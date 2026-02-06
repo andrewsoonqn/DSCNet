@@ -2,7 +2,7 @@
 import torch
 from torch import nn, cat
 from torch.nn.functional import dropout
-from S3_DSConv_3RepeatedOffset import DCN_Conv
+from S3_DSConv import DCN_Conv
 
 
 class EncoderConv(nn.Module):
@@ -32,6 +32,7 @@ class DecoderConv(nn.Module):
         x = self.conv(x)
         x = self.gn(x)
         x = self.relu(x)
+
         return x
 
 
@@ -39,7 +40,7 @@ class DSCNet(nn.Module):
     def __init__(self, n_channels, n_classes, kernel_size, extend_scope, if_offset, device, number, dim):
         super(DSCNet, self).__init__()
         self.device = device
-        self.kernel_size = kernel_size # kernel_size not in use
+        self.kernel_size = kernel_size
         self.extend_scope = extend_scope
         self.if_offset = if_offset
         self.relu = nn.ReLU(inplace=True)
@@ -70,6 +71,18 @@ class DSCNet(nn.Module):
         self.conv6y = DCN_Conv(4*self.number, 8*self.number, 3, self.extend_scope, 1, self.if_offset, self.device)
         self.conv6z = DCN_Conv(4*self.number, 8*self.number, 3, self.extend_scope, 2, self.if_offset, self.device)
         self.conv7 = EncoderConv(32*self.number, 8*self.number)
+
+        self.conv80 = EncoderConv(8*self.number, 16*self.number) #Added
+        self.conv8x = DCN_Conv(8*self.number, 16*self.number, 3, self.extend_scope, 0, self.if_offset, self.device)
+        self.conv8y = DCN_Conv(8*self.number, 16*self.number, 3, self.extend_scope, 1, self.if_offset, self.device)
+        self.conv8z = DCN_Conv(8*self.number, 16*self.number, 3, self.extend_scope, 2, self.if_offset, self.device)
+        self.conv9 = EncoderConv(64*self.number, 16*self.number)
+
+        self.conv100 = EncoderConv(24*self.number, 8*self.number) #Added
+        self.conv10x = DCN_Conv(24*self.number, 8*self.number, 3, self.extend_scope, 0, self.if_offset, self.device)
+        self.conv10y = DCN_Conv(24*self.number, 8*self.number, 3, self.extend_scope, 1, self.if_offset, self.device)
+        self.conv10z = DCN_Conv(24*self.number, 8*self.number, 3, self.extend_scope, 2, self.if_offset, self.device)
+        self.conv11 = EncoderConv(32*self.number, 8*self.number)
 
         self.conv120 = EncoderConv(12*self.number, 4*self.number)
         self.conv12x = DCN_Conv(12*self.number, 4*self.number, 3, self.extend_scope, 0, self.if_offset, self.device)
@@ -129,8 +142,24 @@ class DSCNet(nn.Module):
         x_6z_0 = self.conv6z(x)
         x_3_1 = self.conv7(cat([x_60_0, x_6x_0, x_6y_0, x_6z_0], dim=1))
 
+        # block3a (added)
+        x = self.maxpooling(x_3_1)
+        x_80_0 = self.conv80(x)
+        x_8x_0 = self.conv8x(x)
+        x_8y_0 = self.conv8y(x)
+        x_8z_0 = self.conv8z(x)
+        x_4_1 = self.conv9(cat([x_80_0, x_8x_0, x_8y_0, x_8z_0], dim=1))
+
+        # block4a (added)
+        x = self.up(x_4_1)
+        x_100_2 = self.conv100(cat([x, x_3_1], dim=1))
+        x_10x_2 = self.conv10x(cat([x, x_3_1], dim=1))
+        x_10y_2 = self.conv10y(cat([x, x_3_1], dim=1))
+        x_10z_2 = self.conv10z(cat([x, x_3_1], dim=1))
+        x_3_3 = self.conv11(cat([x_100_2, x_10x_2, x_10y_2, x_10z_2], dim=1))
+
         # block4
-        x = self.up(x_3_1)
+        x = self.up(x_3_3)
         x_120_2 = self.conv120(cat([x, x_2_1], dim=1))
         x_12x_2 = self.conv12x(cat([x, x_2_1], dim=1))
         x_12y_2 = self.conv12y(cat([x, x_2_1], dim=1))

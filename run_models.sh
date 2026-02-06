@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+DSCNetEnv/Scripts/activate
+python DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label MVR_Half_RLROP_ES_48x64x64_Cleaned_2Class_3RepeatedOffset_1p3Extend_v1
+python DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label MVR_Half_RLROP_ES_48x64x64_Cleaned_2Class_3RepeatedOffset_1p3Extend_v2
+python DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label MVR_Half_RLROP_ES_48x64x64_Cleaned_2Class_3RepeatedOffset_1p3Extend_v3
+deactivate

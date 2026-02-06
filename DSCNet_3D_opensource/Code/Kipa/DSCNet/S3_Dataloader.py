@@ -101,10 +101,11 @@ class Dataloader(data.Dataset):
             label_trans = label_trans.numpy()
 
         # Only focus on vessels ...
-        label_trans = np.where(label_trans == 2, 0, label_trans)
+        label_trans = np.where(label_trans == 2, 0, label_trans) 
         label_trans = np.where(label_trans == 3, 2, label_trans)
         label_trans = np.where(label_trans == 4, 0, label_trans)
-        label_trans = to_categorical(label_trans[0], 3)
+        #label_trans = to_categorical(label_trans[0], 3)
+        label_trans = to_categorical(label_trans[0], 2)
 
         return image_trans, label_trans
 

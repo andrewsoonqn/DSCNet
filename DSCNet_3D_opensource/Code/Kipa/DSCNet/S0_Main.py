@@ -46,12 +46,15 @@ def Process(args):
 
     # Step 1: Prepare image and calculate the "mean" and "std" for normalization
     Getmeanstd(args, args.Tr_Image_dir, args.Tr_Meanstd_name)
+    Getmeanstd(args, args.Va_Image_dir, args.Va_Meanstd_name)
     Getmeanstd(args, args.Te_Image_dir, args.Te_Meanstd_name)
 
     # Step 2: Prepare ".txt" files for training and testing data
     Generate_Txt(args.Tr_Image_dir, args.Image_Tr_txt)
+    Generate_Txt(args.Va_Image_dir, args.Image_Va_txt)
     Generate_Txt(args.Te_Image_dir, args.Image_Te_txt)
     Generate_Txt(args.Tr_Label_dir, args.Label_Tr_txt)
+    Generate_Txt(args.Va_Label_dir, args.Label_Va_txt)
     Generate_Txt(args.Te_Label_dir, args.Label_Te_txt)
 
     # Step 3: Train the "Network"
@@ -62,75 +65,108 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # "root_dir" refers to the address of the outermost code, and "***" needs to be replaced
-    root_dir = "***/DSCNet_3D_opensource/"                              # todo
-    data_dir = '***/Data/KIPA/'                                         # todo
+    root_dir = "<Address>/DSCNet/DSCNet_3D_opensource/" # todo
+    data_dir = "<Address>/Data/MiniVess_Dataset/DSCNet_3D/half/" # todo 
+    run_label = "<label_name>" # todo
+
     parser.add_argument(
         "--root_dir", default=root_dir, help="the address of the outermost code"
+    )
+    parser.add_argument(
+        "--data_dir", default=data_dir, help="the address of the data directory"
+    )
+    parser.add_argument(
+        "--run_label", default=run_label, help="the name of the current run"
     )
 
     # information about the image and label
     parser.add_argument(
         "--Tr_Image_dir",
-        default=data_dir + "train/image/",
+        default=None,
         help="the address of the train image",
     )
     parser.add_argument(
+        "--Va_Image_dir",
+        default=None,
+        help="the address of the validation image",
+    )
+    parser.add_argument(
         "--Te_Image_dir",
-        default=data_dir + "open/image/",
+        default=None,
         help="the address of the test image",
     )
     parser.add_argument(
         "--Tr_Label_dir",
-        default=data_dir + "train/label/",
+        default=None,
         help="the address of the train label",
     )
     parser.add_argument(
+        "--Va_Label_dir",
+        default=None,
+        help="the address of the validation label",
+    )
+    parser.add_argument(
         "--Te_Label_dir",
-        default=data_dir + "open/label/",
+        default=None,
         help="the address of the test label",
     )
     parser.add_argument(
         "--Tr_Meanstd_name",
-        default="KIPA_Tr_Meanstd.npy",
+        default=None,
         help="Train image Mean and std for normalization",
     )
     parser.add_argument(
-        "--Te_Meanstd_name",
-        default="KIPA_Te_Meanstd.npy",
-        help="Test image Mean and std for normalization",
+        "--Va_Meanstd_name",
+        default=None,
+        help="Validation image Mean and std for normalization",
     )
+    parser.add_argument(
+        "--Te_Meanstd_name",
+        default=None,
+        help="Test image Mean and std for normalization",
+    ) 
 
     # files that are needed to be used to store contents
     parser.add_argument(
-        "--Dir_Txt", default=root_dir + "Txt/Txt_KIPA/", help="Txt path"
+        "--Dir_Txt", default=None, help="Txt path"
     )
-    parser.add_argument("--Dir_Log", default=root_dir + "Log/KIPA/", help="Log path")
+    parser.add_argument("--Dir_Log", default=None, help="Log path")
     parser.add_argument(
-        "--Dir_Save", default=root_dir + "Results/KIPA/", help="Save path"
+        "--Dir_Save", default=None, help="Save path"
     )
     parser.add_argument(
-        "--Dir_Weights", default=root_dir + "Weights/KIPA/", help="Weights path"
+        "--Dir_Weights", default=None, help="Weights path"
     )
 
     # Folders, dataset, etc.
     parser.add_argument(
         "--Image_Tr_txt",
-        default=root_dir + "Txt/Txt_KIPA/Image_Tr.txt",
+        default=None,
         help="train image txt path",
     )
     parser.add_argument(
+        "--Image_Va_txt",
+        default=None,
+        help="validation image txt path",
+    )
+    parser.add_argument(
         "--Image_Te_txt",
-        default=root_dir + "Txt/Txt_KIPA/Image_Te.txt",
+        default=None,
         help="test image txt path",
     )
     parser.add_argument(
         "--Label_Tr_txt",
-        default=root_dir + "Txt/Txt_KIPA/Label_Tr.txt",
+        default=None,
         help="train label txt path",
     )
     parser.add_argument(
+        "--Label_Va_txt",
+        default=None,
+        help="validation label txt path",
+    )
+    parser.add_argument(
         "--Label_Te_txt",
-        default=root_dir + "Txt/Txt_KIPA/Label_Te.txt",
+        default=None,
         help="test label txt path",
     )
 
@@ -144,25 +180,25 @@ if __name__ == "__main__":
         and apply the same standard to all comparative methods to ensure fairness!!
     """
     parser.add_argument(
-        "--save_path", default=root_dir + "Results/KIPA/DSCNet/", help="Save dir"
+        "--save_path", default=None, help="Save dir"
     )
     parser.add_argument(
         "--save_path_max",
-        default=root_dir + "Results/KIPA/DSCNet_max/",
+        default=None,
         help="Save max dir",
     )
-    parser.add_argument("--model_name", default="DSCNet_KIPA", help="Weights name")
+    parser.add_argument("--model_name", default=None, help="Weights name")
     parser.add_argument(
-        "--model_name_max", default="DSCNet_KIPA_max", help="Max Weights name"
+        "--model_name_max", default=None, help="Max Weights name"
     )
-    parser.add_argument("--log_name", default="DSCNet_KIPA.log", help="Log name")
+    parser.add_argument("--log_name", default=None, help="Log name")
 
     # Network options
     parser.add_argument("--n_channels", default=1, type=int, help="input channels")
-    parser.add_argument("--n_classes", default=3, type=int, help="output channels")
+    parser.add_argument("--n_classes", default=2, type=int, help="output channels") # test this
     parser.add_argument(
         "--kernel_size", default=9, type=int, help="kernel size"
-    )  # 9 refers to 1*9/9*1 for DSConv
+    )  # 9 refers to 1*9/9*1 for DSConv (This parameter is not in use - kernel fixed at 9)
     parser.add_argument(
         "--extend_scope", default=1.0, type=float, help="extend scope"
     )  # This parameter is not used
@@ -175,22 +211,91 @@ if __name__ == "__main__":
     parser.add_argument("--dim", default=8, type=int, help="dim numbers")
 
     # Training options
-    parser.add_argument("--GPU_id", default="0", help="GPU ID")                             # todo
+    parser.add_argument("--GPU_id", default="0", help="GPU ID") # todo
     """
     Reference: --ROI_shape: (128, 96, 96)  3090's memory occupancy is about 16653 MiB
     """
-    parser.add_argument("--ROI_shape", default=(128, 96, 96), type=int, help="roi size")
+    parser.add_argument("--ROI_shape", default=(48, 64, 64), type=int, help="roi size") # Original: 128, 96, 96
     parser.add_argument("--batch_size", default=1, type=int, help="batch size")
-    parser.add_argument("--lr", default=1e-4, type=int, help="learning rate")
+    parser.add_argument("--lr", default=1e-4, type=float, help="learning rate")
+
+    parser.add_argument("--use_rlrop", default=False, type=bool, help="Use ReduceLROnPlateau (when training)")
+    parser.add_argument("--rlr_factor", default=0.5, type=float, help="ReduceLROnPlateau Factor") 
+    parser.add_argument("--rlr_threshold", default=0.002, type=float, help="ReduceLROnPlateau Threshold") 
+    parser.add_argument("--rlr_patience", default=10, type=int, help="ReduceLROnPlateau Patience") 
+    parser.add_argument("--rlr_cooldown", default=2, type=int, help="ReduceLROnPlateau Cooldown")
+
     parser.add_argument(
-        "--start_train_epoch", default=0, type=int, help="Start training epoch"
+        "--start_train_epoch", default=1, type=int, help="Start training epoch"
     )
     parser.add_argument(
-        "--start_verify_epoch", default=200, type=int, help="Start verifying epoch"
+        "--start_verify_epoch", default=3, type=int, help="Start verifying epoch" # Original: 200
     )
-    parser.add_argument("--n_epochs", default=400, type=int, help="Epoch Num")
-    parser.add_argument("--if_retrain", default=True, type=bool, help="If Retrain")
+    parser.add_argument("--n_epochs", default=4, type=int, help="Epoch Num") # Original: 400
+    parser.add_argument("--if_retrain", default=True, type=bool, help="If Retrain") 
     parser.add_argument("--if_onlytest", default=False, type=bool, help="If Only Test")
 
+    parser.add_argument("--if_fullprecision", default=True, type=bool, help="If Full Precision (disable AMP)")
+
+    parser.add_argument("--use_earlystop", default=False, type=bool, help="Use Early Stopping (when training)")
+    parser.add_argument("--earlystop_threshold", default=0.002, type=float, help="Early Stopping Threshold")
+    parser.add_argument("--earlystop_patience", default=30, type=int, help="Early Stopping Patience")
+
     args, unknown = parser.parse_known_args()
+
+    if args.Tr_Image_dir is None:
+        args.Tr_Image_dir = args.data_dir + "train/image/"
+    if args.Va_Image_dir is None:
+        args.Va_Image_dir = args.data_dir + "val/image/"
+    if args.Te_Image_dir is None:
+        args.Te_Image_dir = args.data_dir + "test/image/"
+
+    if args.Tr_Label_dir is None:
+        args.Tr_Label_dir = args.data_dir + "train/label/"
+    if args.Va_Label_dir is None:
+        args.Va_Label_dir = args.data_dir + "val/label/"
+    if args.Te_Label_dir is None:
+        args.Te_Label_dir = args.data_dir + "test/label/"
+
+    if args.Tr_Meanstd_name is None:
+        args.Tr_Meanstd_name = args.run_label + "_Tr_Meanstd.npy"
+    if args.Va_Meanstd_name is None:
+        args.Va_Meanstd_name = args.run_label + "_Va_Meanstd.npy"
+    if args.Te_Meanstd_name is None:
+        args.Te_Meanstd_name = args.run_label + "_Te_Meanstd.npy"
+
+    if args.Dir_Txt is None:
+        args.Dir_Txt = args.root_dir + "Txt/Txt_" + args.run_label + "/"
+    if args.Dir_Log is None:
+        args.Dir_Log = args.root_dir + "Log/" + args.run_label + "/"
+    if args.Dir_Save is None:
+        args.Dir_Save = args.root_dir + "Results/" + args.run_label + "/"
+    if args.Dir_Weights is None:
+        args.Dir_Weights = args.root_dir + "Weights/" + args.run_label + "/"
+
+    if args.Image_Tr_txt is None:
+        args.Image_Tr_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Tr.txt"
+    if args.Image_Va_txt is None:
+        args.Image_Va_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Va.txt"
+    if args.Image_Te_txt is None:
+        args.Image_Te_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Te.txt"
+
+    if args.Label_Tr_txt is None:
+        args.Label_Tr_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Tr.txt"
+    if args.Label_Va_txt is None:
+        args.Label_Va_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Va.txt"
+    if args.Label_Te_txt is None:
+        args.Label_Te_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Te.txt"
+
+    if args.save_path is None:
+        args.save_path = args.root_dir + "Results/" + args.run_label + "/DSCNet/"
+    if args.save_path_max is None:
+        args.save_path_max = args.root_dir + "Results/" + args.run_label + "/DSCNet_max/"
+    if args.model_name is None:
+        args.model_name = "DSCNet_" + args.run_label
+    if args.model_name_max is None:
+        args.model_name_max = "DSCNet_" + args.run_label + "_max"
+    if args.log_name is None:
+        args.log_name = "DSCNet_" + args.run_label + ".log"
+
     Process(args)
