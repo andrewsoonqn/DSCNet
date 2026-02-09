@@ -66,7 +66,7 @@ if __name__ == "__main__":
 
     # "root_dir" refers to the address of the outermost code, and "***" needs to be replaced
     root_dir = "<Address>/DSCNet/DSCNet_3D_opensource/" # todo
-    data_dir = "<Address>/Data/MiniVess_Dataset/DSCNet_3D/half/" # todo 
+    data_dir = "<Address>/DSCNet/Data/MiniVess_Half/" # todo 
     run_label = "<label_name>" # todo
 
     parser.add_argument(
@@ -211,7 +211,7 @@ if __name__ == "__main__":
     parser.add_argument("--dim", default=8, type=int, help="dim numbers")
 
     # Training options
-    parser.add_argument("--GPU_id", default="0", help="GPU ID") # todo
+    parser.add_argument("--GPU_id", default="0", help="GPU ID") # not in use
     """
     Reference: --ROI_shape: (128, 96, 96)  3090's memory occupancy is about 16653 MiB
     """
@@ -229,9 +229,9 @@ if __name__ == "__main__":
         "--start_train_epoch", default=1, type=int, help="Start training epoch"
     )
     parser.add_argument(
-        "--start_verify_epoch", default=3, type=int, help="Start verifying epoch" # Original: 200
+        "--start_verify_epoch", default=101, type=int, help="Start verifying epoch" # Original: 200
     )
-    parser.add_argument("--n_epochs", default=4, type=int, help="Epoch Num") # Original: 400
+    parser.add_argument("--n_epochs", default=200, type=int, help="Epoch Num") # Original: 400
     parser.add_argument("--if_retrain", default=True, type=bool, help="If Retrain") 
     parser.add_argument("--if_onlytest", default=False, type=bool, help="If Only Test")
 

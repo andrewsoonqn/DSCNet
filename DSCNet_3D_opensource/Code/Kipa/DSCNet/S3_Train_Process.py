@@ -1029,7 +1029,8 @@ def Predict_Network_amp(net, args):
 
 
 def Train(args):
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.GPU_id
+    #os.environ["CUDA_VISIBLE_DEVICES"] = args.GPU_id 
+    #removed above, replace with use of `export CUDA_VISIBLE_DEVICES=<num>` and `export OMP_NUM_THREADS=<num>` before running S0_Main.py
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     net = DSCNet(

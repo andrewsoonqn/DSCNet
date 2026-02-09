@@ -20,7 +20,7 @@ class Conv(nn.Module):
 class DCN_Conv(nn.Module):
     def __init__(self, in_ch, out_ch, kernel_size, extend_scope, morph, if_offset, device):
         super(DCN_Conv, self).__init__()
-        # hardcoded for kernel_size = ?
+        # hardcoded for kernel_size = 7
         self.kernel_size = 7
         self.offset_conv3 = nn.Conv3d(in_ch, 3, 3, padding=1)
         self.offset_conv3r = nn.Conv3d(in_ch, 3, 3, padding=1)

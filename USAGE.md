@@ -5,22 +5,20 @@
 - Navigate to the root `DSCNet` folder.
 
 - In `DSCNet_2D_opensource/Code/DRIVE/DSCNET/S0_Main.py`:
-  
   - Update the root directory to point to the local `DSCNet_2D_opensource` folder.
-  
   - Update the default `--GPU_id` as required. (ID=0 is usually the GPU, ID=1 is the CPU).
 
 ##### Running within environment:
 
 Navigate to the root `DSCNet` folder.
 
-For creation of environment (only required for the first time): 
+For creation of environment (only required for the first time):
 
 ```python
 python -m venv DSCNetEnv
 ```
 
-For activating environment: 
+For activating environment:
 
 ```python
 DSCNetEnv\Scripts\activate
@@ -53,13 +51,19 @@ python DSCNet_2D_opensource\Code\DRIVE\DSCNet\S0_Main.py
 For training 3D version on new dataset:
 
 ```python
-python DSCNet_3D_opensource\Code\Kipa\DSCNet\S0_Main.py
+OMP_NUM_THREADS=<num> CUDA_VISIBLE_DEVICES=<num> python DSCNet_3D_opensource\Code\Kipa\DSCNet\S0_Main.py
 ```
 
-Or:
+Or (not in use):
 
 ```
 set PYTORCH_ALLOC_CONF=expandable_segments:True && python DSCNet_3D_opensource\Code\Kipa\DSCNet\S0_Main.py
+```
+
+For training 3D version on server:
+
+```python
+OMP_NUM_THREADS=<num> CUDA_VISIBLE_DEVICES=<num> python DSCNet_3D_opensource\Code\Kipa\DSCNet\S0_Main.py > logs/session_$(date +%F_%H-%M-%S).log 2>&1
 ```
 
 For predicting 3D version with trained model"
