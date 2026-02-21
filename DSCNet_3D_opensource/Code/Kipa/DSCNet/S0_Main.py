@@ -65,8 +65,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # "root_dir" refers to the address of the outermost code, and "***" needs to be replaced
-    root_dir = "<Address>/DSCNet/DSCNet_3D_opensource/" # todo
-    data_dir = "<Address>/DSCNet/Data/MiniVess_Half/" # todo 
+    root_dir = "DSCNet_3D_opensource/" # todo
+    data_dir = "Data/MiniVess_Half/" # todo 
     run_label = "<label_name>" # todo
 
     parser.add_argument(
@@ -215,7 +215,7 @@ if __name__ == "__main__":
     """
     Reference: --ROI_shape: (128, 96, 96)  3090's memory occupancy is about 16653 MiB
     """
-    parser.add_argument("--ROI_shape", default=(48, 64, 64), type=int, help="roi size") # Original: 128, 96, 96
+    parser.add_argument("--ROI_shape", default=(96, 96, 96), type=int, help="roi size") # Original: 128, 96, 96
     parser.add_argument("--batch_size", default=1, type=int, help="batch size")
     parser.add_argument("--lr", default=1e-4, type=float, help="learning rate")
 

@@ -140,7 +140,7 @@ def Train_net(net, args):
     # Load dataset
     train_dataset = Dataloader(args)
     train_dataloader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True
+        train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2
     ) #num_workers=8, persistent_workers=True (slower)
     optimizer = torch.optim.AdamW(net.parameters(), lr=args.lr, betas=(0.9, 0.95)) # try weight_decay
     # It is possible to choose whether to use a dynamic learning rate,
@@ -248,7 +248,7 @@ def Train_net_amp(net, args):
     # Load dataset
     train_dataset = Dataloader(args)
     train_dataloader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True
+        train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2
     )
 
     scaler = torch.amp.GradScaler(device="cuda") # for AMP implementation
@@ -1032,7 +1032,8 @@ def Train(args):
     #os.environ["CUDA_VISIBLE_DEVICES"] = args.GPU_id 
     #removed above, replace with use of `export CUDA_VISIBLE_DEVICES=<num>` and `export OMP_NUM_THREADS=<num>` before running S0_Main.py
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    print("CUDA available:", torch.cuda.is_available())
+    
     net = DSCNet(
         n_channels=args.n_channels,
         n_classes=args.n_classes,
