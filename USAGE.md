@@ -131,11 +131,11 @@ python DSCNet_2D_opensource/Code/DRIVE/DSCNet/S0_Main.py
 For training 3D version:
 
 ```python
-python DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label <run_label>
+set OMP_NUM_THREADS=8 && set CUDA_VISIBLE_DEVICES=0 && python -u DSCNet_3D_opensource\Code\Kipa\DSCNet\S0_Main.py --run_label <run_label>
 ```
 
 For predicting 3D version with trained model:
 
 ```python
-  python DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label <run_label> --Dir_Weights <path/to/weights/dir> --model_name_max <name_of_model> --if_onlytest True
+python DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label <run_label> --Dir_Weights <path/to/weights/dir> --model_name_max <name_of_model> --if_onlytest True
 ```

@@ -25,7 +25,7 @@ class DCN_Conv(nn.Module):
         self.offset_conv3 = nn.Conv3d(in_ch, 3, 3, padding=1)
         self.offset_conv5 = nn.Conv3d(in_ch, 3, 5, padding=2)
         self.offset_conv7 = nn.Conv3d(in_ch, 3, 7, padding=3)
-        self.offset_conv9 = nn.Conv3d(in_ch, 3, 9, padding=3)
+        self.offset_conv9 = nn.Conv3d(in_ch, 3, 9, padding=4)
         self.bn = nn.BatchNorm3d(3 * self.kernel_size) # Normalizes across the Channel dimension; returns same shape as input
         self.device = device
 
