@@ -200,7 +200,7 @@ if __name__ == "__main__":
         "--kernel_size", default=9, type=int, help="kernel size"
     )  # 9 refers to 1*9/9*1 for DSConv (This parameter is not in use - kernel fixed by changing the S3_DSConv file in S3_DSCNet)
     parser.add_argument(
-        "--extend_scope", default=1.0, type=float, help="extend scope"
+        "--extend_scope", default=1.75, type=float, help="extend scope"
     )  # This parameter is not used
     parser.add_argument(
         "--if_offset", default=True, type=bool, help="if offset"
@@ -229,9 +229,9 @@ if __name__ == "__main__":
         "--start_train_epoch", default=1, type=int, help="Start training epoch"
     )
     parser.add_argument(
-        "--start_verify_epoch", default=3, type=int, help="Start verifying epoch" # Original: 200
+        "--start_verify_epoch", default=51, type=int, help="Start verifying epoch" # Original: 200
     )
-    parser.add_argument("--n_epochs", default=3, type=int, help="Epoch Num") # Original: 400
+    parser.add_argument("--n_epochs", default=100, type=int, help="Epoch Num") # Original: 400
     parser.add_argument("--if_retrain", default=True, type=bool, help="If Retrain") 
     parser.add_argument("--if_onlytest", default=False, type=bool, help="If Only Test")
 
