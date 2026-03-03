@@ -112,7 +112,7 @@ For training 2D version:
 
 For training 3D version:
 
-- `set OMP_NUM_THREADS=8 && set CUDA_VISIBLE_DEVICES= && python -u DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label <run_label>`
+- `set OMP_NUM_THREADS=8 && set CUDA_VISIBLE_DEVICES=0 && python -u DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label <run_label>`
 
 For predicting 3D version with trained model:
 

@@ -25,6 +25,9 @@ class DCN_Conv(nn.Module):
         self.bn = nn.BatchNorm3d(3 * self.kernel_size) # Normalizes across the Channel dimension; returns same shape as input
         self.device = device
 
+        self.extend_conv = nn.Conv3d(in_ch, self.kernel_size, 3, padding=1)
+        self.exbn = nn.BatchNorm3d(self.kernel_size)
+
         self.if_offset = if_offset
         self.morph = morph
         self.extend_scope = extend_scope
@@ -45,8 +48,12 @@ class DCN_Conv(nn.Module):
         offset = torch.tanh(offset) # Output: [N, 3*K, D, W, H]; tanh is (-1, 1)
         input_shape = f.shape # shape: [N, C, D, W, H];
 
+        extend = self.extend_conv(f)
+        extend = self.exbn(extend)
+        extend = self.relu(extend)
+        
         dcn = DCN(input_shape, self.kernel_size, self.extend_scope, self.morph, self.device)
-        deformed_feature = dcn.deform_conv(f, offset, self.if_offset) # _coordinate_map_3D (Output: [N, D, W, H*K] OR [N, D, W*K, H] OR [N, D*K, W, H]) + _bilinear_interpolate_3D (Output: [N, C, D, W, H*K] etc.)
+        deformed_feature = dcn.deform_conv(f, offset, self.if_offset, extend) # _coordinate_map_3D (Output: [N, D, W, H*K] OR [N, D, W*K, H] OR [N, D*K, W, H]) + _bilinear_interpolate_3D (Output: [N, C, D, W, H*K] etc.)
 
         # Only ever does one of the following
         if self.morph == 0:
@@ -83,7 +90,7 @@ class DCN(object):
     output: [N,1,K,K*W,H]   coordinate map
     output: [N,1,D,W,K*H]   coordinate map
     '''
-    def _coordinate_map_3D(self, offset, if_offset):
+    def _coordinate_map_3D(self, offset, if_offset, extend):
         # offset
         #offset1, offset2 = torch.split(offset, 3 * self.num_points, dim=1) # Split offset into groups of 3*self.num_points i.e. [N, 3*K, D, W, H]
         z_offset1, y_offset1, x_offset1 = torch.split(offset, self.num_points, dim=1) # Split offset1 into groups of self.num_points i.e. [N, K, D, W, H]
@@ -163,6 +170,7 @@ class DCN(object):
                 y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4).to(self.device) # [N, K, D, W, H]
                 z_new = z_new.add(z_offset1_new.mul(self.extend_scope)) # multiply new offsets by self.extend_scope, then add z_offset1_new to z_new (which is all zeros except for depth)
                 y_new = y_new.add(y_offset1_new.mul(self.extend_scope)) # multiply new offsets by self.extend_scope, then add y_offset1_new to y_new (which is all zeros except for width)
+                x_new = x_new.mul(extend)
 
                 z_new = z_new.reshape([self.num_batch, 1, 1, self.num_points, self.depth, self.width, self.height]) # [N, 1, 1, K, D, W, H]
                 z_new = z_new.permute(0, 4, 1, 5, 2, 6, 3) # [N, D, 1, W, 1, H, K]
@@ -229,6 +237,7 @@ class DCN(object):
                 z_offset1_new = z_offset1_new.permute(1, 0, 2, 3, 4).to(self.device)
                 z_new = z_new.add(z_offset1_new.mul(self.extend_scope))
                 x_new = x_new.add(x_offset1_new.mul(self.extend_scope))
+                y_new = y_new.mul(extend)
             z_new = z_new.reshape([self.num_batch, 1, self.num_points, 1, self.depth, self.width, self.height])
             z_new = z_new.permute(0, 4, 1, 5, 2, 6, 3)
             z_new = z_new.reshape([self.num_batch, self.depth, self.num_points * self.width, self.height])
@@ -292,6 +301,7 @@ class DCN(object):
                 y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4).to(self.device)
                 x_new = x_new.add(x_offset1_new.mul(self.extend_scope))
                 y_new = y_new.add(y_offset1_new.mul(self.extend_scope))
+                z_new = z_new.mul(extend)
 
             z_new = z_new.reshape([self.num_batch, self.num_points, 1, 1, self.depth, self.width, self.height])
             z_new = z_new.permute(0, 4, 1, 5, 2, 6, 3)
@@ -428,7 +438,7 @@ class DCN(object):
             outputs = outputs.permute(0, 4, 1, 2, 3)
         return outputs
 
-    def deform_conv(self, input, offset, if_offset):
-        z, y, x = self._coordinate_map_3D(offset, if_offset)
+    def deform_conv(self, input, offset, if_offset, extend):
+        z, y, x = self._coordinate_map_3D(offset, if_offset, extend)
         deformed_feature = self._bilinear_interpolate_3D(input, z, y, x)
         return deformed_feature
