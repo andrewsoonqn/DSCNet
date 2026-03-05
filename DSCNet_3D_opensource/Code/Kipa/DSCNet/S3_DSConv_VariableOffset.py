@@ -20,7 +20,7 @@ class Conv(nn.Module):
 class DCN_Conv(nn.Module):
     def __init__(self, in_ch, out_ch, kernel_size, extend_scope, morph, if_offset, device):
         super(DCN_Conv, self).__init__()
-        self.kernel_size = 9
+        self.kernel_size = 5
         self.offset_conv = nn.Conv3d(in_ch, 3 * self.kernel_size, 3, padding=1)
         self.bn = nn.BatchNorm3d(3 * self.kernel_size) # Normalizes across the Channel dimension; returns same shape as input
         self.device = device
@@ -39,14 +39,14 @@ class DCN_Conv(nn.Module):
 
 
     def forward(self, f):
-        # Input: [N, C, D, W, H];
-        offset = self.offset_conv(f) # Output: [N, 3*C, D, W, H];
-        offset = self.bn(offset) # Output: [N, 3*C, D, W, H];
-        offset = torch.tanh(offset) # Output: [N, 3*C, D, W, H]; tanh is (-1, 1)
+        # Input: [N, K, D, W, H];
+        offset = self.offset_conv(f) # Output: [N, 3*K, D, W, H];
+        offset = self.bn(offset) # Output: [N, 3*K, D, W, H];
+        offset = torch.tanh(offset) # Output: [N, 3*K, D, W, H]; tanh is (-1, 1)
         input_shape = f.shape # shape: [N, C, D, W, H];
 
         dcn = DCN(input_shape, self.kernel_size, self.extend_scope, self.morph, self.device)
-        deformed_feature = dcn.deform_conv(f, offset, self.if_offset) # _coordinate_map_3D (Output: [N, D, W, H*C] OR [N, D, W*C, H] OR [N, D*C, W, H]) + _bilinear_interpolate_3D (Output: [N, C, D, W, H])
+        deformed_feature = dcn.deform_conv(f, offset, self.if_offset) # _coordinate_map_3D (Output: [N, D, W, H*K] OR [N, D, W*K, H] OR [N, D*K, W, H]) + _bilinear_interpolate_3D (Output: [N, C, D, W, H*K] etc.)
 
         # Only ever does one of the following
         if self.morph == 0:
@@ -85,59 +85,59 @@ class DCN(object):
     '''
     def _coordinate_map_3D(self, offset, if_offset):
         # offset
-        #offset1, offset2 = torch.split(offset, 3 * self.num_points, dim=1) # Split offset into groups of 3*self.num_points i.e. [N, 3*C, D, W, H]
-        z_offset1, y_offset1, x_offset1 = torch.split(offset, self.num_points, dim=1) # Split offset1 into groups of self.num_points i.e. [N, C, D, W, H]
-        #z_offset2, y_offset2, x_offset2 = torch.split(offset2, self.num_points, dim=1) # Split offset2 into groups of self.num_points i.e. [N, C, D, W, H]
+        #offset1, offset2 = torch.split(offset, 3 * self.num_points, dim=1) # Split offset into groups of 3*self.num_points i.e. [N, 3*K, D, W, H]
+        z_offset1, y_offset1, x_offset1 = torch.split(offset, self.num_points, dim=1) # Split offset1 into groups of self.num_points i.e. [N, K, D, W, H]
+        #z_offset2, y_offset2, x_offset2 = torch.split(offset2, self.num_points, dim=1) # Split offset2 into groups of self.num_points i.e. [N, K, D, W, H]
 
         z_center = torch.arange(0, self.depth).repeat([self.width*self.height]) # [0 to self.depth] * self.width * self.height = [D*W*H]
         z_center = z_center.reshape(self.width, self.height, self.depth) # [W, H, D]
         z_center = z_center.permute(2, 1, 0) # [D, W, H]
         z_center = z_center.reshape([-1, self.depth, self.width, self.height]) # [1, D, W, H]
-        z_center = z_center.repeat([self.num_points, 1, 1, 1]).float() # [C, D, W, H]
-        z_center = z_center.unsqueeze(0) # [1, C, D, W, H] with running numbers going in depth direction
+        z_center = z_center.repeat([self.num_points, 1, 1, 1]).float() # [K, D, W, H]
+        z_center = z_center.unsqueeze(0) # [1, K, D, W, H] with running numbers going in depth direction
 
         y_center = torch.arange(0, self.width).repeat([self.height * self.depth]) # [0 to self.width] * self.height * self.depth] = [W*H*D]
         y_center = y_center.reshape(self.height, self.depth, self.width) # [H, D, W]
         y_center = y_center.permute(1, 2, 0) # [D, W, H]
         y_center = y_center.reshape([-1, self.depth, self.width, self.height]) # [1, D, W, H]
-        y_center = y_center.repeat([self.num_points, 1, 1, 1]).float() # [C, D, W, H]
-        y_center = y_center.unsqueeze(0) # [1, C, D, W, H] with running numbers going in width direction
+        y_center = y_center.repeat([self.num_points, 1, 1, 1]).float() # [K, D, W, H]
+        y_center = y_center.unsqueeze(0) # [1, K, D, W, H] with running numbers going in width direction
 
         x_center = torch.arange(0, self.height).repeat([self.depth * self.width]) # [0 to self.height] * self.depth * self.width] = [H*D*W]
         x_center = x_center.reshape(self.depth, self.width, self.height) # [D, W, H]
         x_center = x_center.permute(0, 1, 2) # [D, W, H] (not necessary?)
         x_center = x_center.reshape([-1, self.depth, self.width, self.height]) # [1, D, W, H]
-        x_center = x_center.repeat([self.num_points, 1, 1, 1]).float() # [C, D, W, H]
-        x_center = x_center.unsqueeze(0) # [1, C, D, W, H] with running numbers going in height direction
+        x_center = x_center.repeat([self.num_points, 1, 1, 1]).float() # [K, D, W, H]
+        x_center = x_center.unsqueeze(0) # [1, K, D, W, H] with running numbers going in height direction
 
         if self.morph == 0:
             z = torch.linspace(0, 0, 1) # start=0, end=0, size=1, [1]
             y = torch.linspace(0, 0, 1) # start=0, end=0, size=1, [1]
-            x = torch.linspace(-int(self.num_points//2), int(self.num_points//2), int(self.num_points)) # start=-self.num_points//2, end=self.num_points//2, size=self.num_points, [C]
-            z, y, x = torch.meshgrid(z, y, x) # z = [1, 1, C] all zeros, y = [1, 1, C] all zeros, x = [1, 1, C] -self.num_points//2 to self.num_points//2
-            z_spread = z.reshape(-1, 1) # z = [C, 1] all zeros (-1 means infer that dimension)
-            y_spread = y.reshape(-1, 1) # y = [C, 1] all zeros
-            x_spread = x.reshape(-1, 1) # x = [C, 1] -self.num_points//2 to self.num_points//2
+            x = torch.linspace(-int(self.num_points//2), int(self.num_points//2), int(self.num_points)) # start=-self.num_points//2, end=self.num_points//2, size=self.num_points, [K]
+            z, y, x = torch.meshgrid(z, y, x) # z = [1, 1, K] all zeros, y = [1, 1, K] all zeros, x = [1, 1, K] -self.num_points//2 to self.num_points//2
+            z_spread = z.reshape(-1, 1) # z = [K, 1] all zeros (-1 means infer that dimension)
+            y_spread = y.reshape(-1, 1) # y = [K, 1] all zeros
+            x_spread = x.reshape(-1, 1) # x = [K, 1] -self.num_points//2 to self.num_points//2
 
-            z_grid = z_spread.repeat([1, self.depth * self.width * self.height]) # [C, D*W*H] all zeros
-            z_grid = z_grid.reshape([self.num_points, self.depth, self.width, self.height]) # [C, D, W, H]
-            z_grid = z_grid.unsqueeze(0)  # [1, C, D, W, H] all zeros
+            z_grid = z_spread.repeat([1, self.depth * self.width * self.height]) # [K, D*W*H] all zeros
+            z_grid = z_grid.reshape([self.num_points, self.depth, self.width, self.height]) # [K, D, W, H]
+            z_grid = z_grid.unsqueeze(0)  # [1, K, D, W, H] all zeros
 
             y_grid = y_spread.repeat([1, self.depth * self.width * self.height])
             y_grid = y_grid.reshape([self.num_points, self.depth, self.width, self.height])
-            y_grid = y_grid.unsqueeze(0)  # [1, C, D, W, H] all zeros
+            y_grid = y_grid.unsqueeze(0)  # [1, K, D, W, H] all zeros
 
             x_grid = x_spread.repeat([1, self.depth * self.width * self.height])
             x_grid = x_grid.reshape([self.num_points, self.depth, self.width, self.height])
-            x_grid = x_grid.unsqueeze(0)  # [1, C, D, W, H] C running from -self.num_points//2 to self.num_points//2
+            x_grid = x_grid.unsqueeze(0)  # [1, K, D, W, H] C running from -self.num_points//2 to self.num_points//2
 
-            z_new = z_center + z_grid # [1, C, D, W, H] 0 to depth in the D axis
-            y_new = y_center + y_grid # [1, C, D, W, H] 0 to width in the W axis
-            x_new = x_center + x_grid # [1, C, D, W, H] 0 to height in the H axis and -self.num_points//2 to self.num_points//2 in the C axis
+            z_new = z_center + z_grid # [1, K, D, W, H] 0 to depth in the D axis
+            y_new = y_center + y_grid # [1, K, D, W, H] 0 to width in the W axis
+            x_new = x_center + x_grid # [1, K, D, W, H] 0 to height in the H axis and -self.num_points//2 to self.num_points//2 in the K axis
 
-            z_new = z_new.repeat(self.num_batch, 1, 1, 1, 1) # [N, C, D, W, H] 0 to depth in the D axis
-            y_new = y_new.repeat(self.num_batch, 1, 1, 1, 1) # [N, C, D, W, H] 0 to width in the W axis
-            x_new = x_new.repeat(self.num_batch, 1, 1, 1, 1) # [N, C, D, W, H] 0 to height in the H axis and -self.num_points//2 to self.num_points//2 in the C axis
+            z_new = z_new.repeat(self.num_batch, 1, 1, 1, 1) # [N, K, D, W, H] 0 to depth in the D axis
+            y_new = y_new.repeat(self.num_batch, 1, 1, 1, 1) # [N, K, D, W, H] 0 to width in the W axis
+            x_new = x_new.repeat(self.num_batch, 1, 1, 1, 1) # [N, K, D, W, H] 0 to height in the H axis and -self.num_points//2 to self.num_points//2 in the K axis
 
             z_new = z_new.to(self.device)
             y_new = y_new.to(self.device)
@@ -147,10 +147,10 @@ class DCN(object):
             y_offset1_new = y_offset1.detach().clone() # detach ensures that gradients do not propagate from y_offset1_new to y_offset1; clone creates an independent matrix in memory
 
             if if_offset:
-                z_offset1_new = z_offset1_new.permute(1, 0, 2, 3, 4) # [C, N, D, W, H] why? offset in channel direction.
-                y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4) # [C, N, D, W, H]
-                z_offset1 = z_offset1.permute(1, 0, 2, 3, 4) # [C, N, D, W, H]
-                y_offset1 = y_offset1.permute(1, 0, 2, 3, 4) # [C, N, D, W, H]
+                z_offset1_new = z_offset1_new.permute(1, 0, 2, 3, 4) # [K, N, D, W, H] why? offset in channel direction.
+                y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4) # [K, N, D, W, H]
+                z_offset1 = z_offset1.permute(1, 0, 2, 3, 4) # [K, N, D, W, H]
+                y_offset1 = y_offset1.permute(1, 0, 2, 3, 4) # [K, N, D, W, H]
                 center = int(self.num_points // 2)
                 z_offset1_new[center] = 0
                 y_offset1_new[center] = 0
@@ -159,22 +159,22 @@ class DCN(object):
                     z_offset1_new[center - index] = z_offset1_new[center - index + 1] + z_offset1[center - index]
                     y_offset1_new[center + index] = y_offset1_new[center + index - 1] + y_offset1[center + index]
                     y_offset1_new[center - index] = y_offset1_new[center - index + 1] + y_offset1[center - index]
-                z_offset1_new = z_offset1_new.permute(1, 0, 2, 3, 4).to(self.device) # [N, C, D, W, H]
-                y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4).to(self.device) # [N, C, D, W, H]
+                z_offset1_new = z_offset1_new.permute(1, 0, 2, 3, 4).to(self.device) # [N, K, D, W, H]
+                y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4).to(self.device) # [N, K, D, W, H]
                 z_new = z_new.add(z_offset1_new.mul(self.extend_scope)) # multiply new offsets by self.extend_scope, then add z_offset1_new to z_new (which is all zeros except for depth)
                 y_new = y_new.add(y_offset1_new.mul(self.extend_scope)) # multiply new offsets by self.extend_scope, then add y_offset1_new to y_new (which is all zeros except for width)
 
-                z_new = z_new.reshape([self.num_batch, 1, 1, self.num_points, self.depth, self.width, self.height]) # [N, 1, 1, C, D, W, H]
-                z_new = z_new.permute(0, 4, 1, 5, 2, 6, 3) # [N, D, 1, W, 1, H, C]
-                z_new = z_new.reshape([self.num_batch, self.depth, self.width, self.num_points*self.height]) # [N, D, W, H*C]
+                z_new = z_new.reshape([self.num_batch, 1, 1, self.num_points, self.depth, self.width, self.height]) # [N, 1, 1, K, D, W, H]
+                z_new = z_new.permute(0, 4, 1, 5, 2, 6, 3) # [N, D, 1, W, 1, H, K]
+                z_new = z_new.reshape([self.num_batch, self.depth, self.width, self.num_points*self.height]) # [N, D, W, H*K]
 
                 y_new = y_new.reshape([self.num_batch, 1, 1, self.num_points, self.depth, self.width, self.height])
                 y_new = y_new.permute(0, 4, 1, 5, 2, 6, 3)
-                y_new = y_new.reshape([self.num_batch, self.depth, self.width, self.num_points*self.height]) # [N, D, W, H*C]
+                y_new = y_new.reshape([self.num_batch, self.depth, self.width, self.num_points*self.height]) # [N, D, W, H*K]
 
                 x_new = x_new.reshape([self.num_batch, 1, 1, self.num_points, self.depth, self.width, self.height])
                 x_new = x_new.permute(0, 4, 1, 5, 2, 6, 3)
-                x_new = x_new.reshape([self.num_batch, self.depth, self.width, self.num_points*self.height]) # [N, D, W, H*C]
+                x_new = x_new.reshape([self.num_batch, self.depth, self.width, self.num_points*self.height]) # [N, D, W, H*K]
             return z_new, y_new, x_new
 
         elif self.morph == 1:

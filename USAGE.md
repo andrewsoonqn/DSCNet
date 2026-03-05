@@ -86,7 +86,7 @@ For activating environment:
 
 For activating environment on server:
 
--  `source DSCNetEnv/bin/activate`
+- `source DSCNetEnv/bin/activate`
 
 For installing requirements (`requirements0.txt` for Jon's laptop, `requirements_1.txt` for Jon's desktop, `requirements2.txt` for Jon's server configuration, try the above or create your own `requirements.txt` file):
 
@@ -112,7 +112,7 @@ For training 2D version:
 
 For training 3D version:
 
-- `set OMP_NUM_THREADS=8 && set CUDA_VISIBLE_DEVICES= && python -u DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label <run_label>`
+- `set OMP_NUM_THREADS=8 && set CUDA_VISIBLE_DEVICES=0 && python -u DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label <run_label>`
 
 For predicting 3D version with trained model:
 
