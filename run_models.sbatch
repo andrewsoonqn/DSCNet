@@ -1,6 +1,6 @@
 #!/bin/bash
 # ─── Job identification ─────────────────────────────────────────────────
-#SBATCH --job-name=sg-hist-ocr
+#SBATCH --job-name=dscnet-test
 #SBATCH --output=logs/slurm_%A_%a.out
 #SBATCH --error=logs/slurm_%A_%a.err
 
@@ -33,7 +33,7 @@ echo "  Start Time      : $(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================================================"
 
 # ─── Project directory ──────────────────────────────────────────────────
-PROJECT_DIR="." #TODO
+PROJECT_DIR="/home/a/andrewsq/dev/dscnet/"
 cd "${PROJECT_DIR}"
 echo "Changed to project directory: ${PROJECT_DIR}"
 
@@ -60,7 +60,7 @@ fi
 #    source activate your-env-name
 #  or:
 #    conda activate your-env-name
-VENV_DIR= #TODO or use V"${VENV_DIR:-.venv}"
+VENV_DIR="${PROJECT_DIR}/DSCNetEnv/"
 if [ -d "${VENV_DIR}" ]; then
     echo "Activating virtual environment: ${VENV_DIR}"
     source "${VENV_DIR}/bin/activate"
@@ -129,7 +129,6 @@ echo ""
 #                           NVIDIA GPU INFO                                   #
 ###############################################################################
 
-echo ""
 echo "========================================================================"
 echo "  GPU Status (nvidia-smi)"
 echo "========================================================================"
@@ -140,7 +139,7 @@ echo ""
 #                          RUN THE PIPELINE                                   #
 ###############################################################################
 
-CMD="python main.py" #TODO
+CMD="python ${PROJECT_DIR}/DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py"
 
 echo "========================================================================"
 echo "  Executing pipeline"
