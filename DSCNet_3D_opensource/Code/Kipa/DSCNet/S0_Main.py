@@ -65,9 +65,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # "root_dir" refers to the address of the outermost code, and "***" needs to be replaced
-    root_dir = "DSCNet_3D_opensource/" # todo
-    data_dir = "Data/MiniVess_Half_Binned/" # todo 
-    run_label = "<label_name>" # todo
+    root_dir = "DSCNet_3D_opensource/"  # todo
+    data_dir = "Data/MiniVess_Half/"  # todo
+    run_label = "DSCNet_3D"  # todo
 
     parser.add_argument(
         "--root_dir", default=root_dir, help="the address of the outermost code"
@@ -124,19 +124,13 @@ if __name__ == "__main__":
         "--Te_Meanstd_name",
         default=None,
         help="Test image Mean and std for normalization",
-    ) 
+    )
 
     # files that are needed to be used to store contents
-    parser.add_argument(
-        "--Dir_Txt", default=None, help="Txt path"
-    )
+    parser.add_argument("--Dir_Txt", default=None, help="Txt path")
     parser.add_argument("--Dir_Log", default=None, help="Log path")
-    parser.add_argument(
-        "--Dir_Save", default=None, help="Save path"
-    )
-    parser.add_argument(
-        "--Dir_Weights", default=None, help="Weights path"
-    )
+    parser.add_argument("--Dir_Save", default=None, help="Save path")
+    parser.add_argument("--Dir_Weights", default=None, help="Weights path")
 
     # Folders, dataset, etc.
     parser.add_argument(
@@ -179,23 +173,21 @@ if __name__ == "__main__":
         we save the <best> results on the validation dataset in the <max> folder, 
         and apply the same standard to all comparative methods to ensure fairness!!
     """
-    parser.add_argument(
-        "--save_path", default=None, help="Save dir"
-    )
+    parser.add_argument("--save_path", default=None, help="Save dir")
     parser.add_argument(
         "--save_path_max",
         default=None,
         help="Save max dir",
     )
     parser.add_argument("--model_name", default=None, help="Weights name")
-    parser.add_argument(
-        "--model_name_max", default=None, help="Max Weights name"
-    )
+    parser.add_argument("--model_name_max", default=None, help="Max Weights name")
     parser.add_argument("--log_name", default=None, help="Log name")
 
     # Network options
     parser.add_argument("--n_channels", default=1, type=int, help="input channels")
-    parser.add_argument("--n_classes", default=2, type=int, help="output channels") # test this
+    parser.add_argument(
+        "--n_classes", default=2, type=int, help="output channels"
+    )  # test this
     parser.add_argument(
         "--kernel_size", default=9, type=int, help="kernel size"
     )  # 9 refers to 1*9/9*1 for DSConv (This parameter is not in use - kernel fixed by changing the S3_DSConv file in S3_DSCNet)
@@ -211,35 +203,72 @@ if __name__ == "__main__":
     parser.add_argument("--dim", default=8, type=int, help="dim numbers")
 
     # Training options
-    parser.add_argument("--GPU_id", default="0", help="GPU ID") # not in use
+    parser.add_argument("--GPU_id", default="0", help="GPU ID")  # not in use
     """
     Reference: --ROI_shape: (128, 96, 96)  3090's memory occupancy is about 16653 MiB
     """
-    parser.add_argument("--ROI_shape", default=(64, 64, 64), type=int, help="roi size") # Original: 128, 96, 96
+    parser.add_argument(
+        "--ROI_shape", default=(64, 64, 64), type=int, help="roi size"
+    )  # Original: 128, 96, 96
     parser.add_argument("--batch_size", default=1, type=int, help="batch size")
     parser.add_argument("--lr", default=1e-4, type=float, help="learning rate")
 
-    parser.add_argument("--use_rlrop", default=False, type=bool, help="Use ReduceLROnPlateau (when training)")
-    parser.add_argument("--rlr_factor", default=0.5, type=float, help="ReduceLROnPlateau Factor") 
-    parser.add_argument("--rlr_threshold", default=0.002, type=float, help="ReduceLROnPlateau Threshold") 
-    parser.add_argument("--rlr_patience", default=10, type=int, help="ReduceLROnPlateau Patience") 
-    parser.add_argument("--rlr_cooldown", default=2, type=int, help="ReduceLROnPlateau Cooldown")
+    parser.add_argument(
+        "--use_rlrop",
+        default=False,
+        type=bool,
+        help="Use ReduceLROnPlateau (when training)",
+    )
+    parser.add_argument(
+        "--rlr_factor", default=0.5, type=float, help="ReduceLROnPlateau Factor"
+    )
+    parser.add_argument(
+        "--rlr_threshold", default=0.002, type=float, help="ReduceLROnPlateau Threshold"
+    )
+    parser.add_argument(
+        "--rlr_patience", default=10, type=int, help="ReduceLROnPlateau Patience"
+    )
+    parser.add_argument(
+        "--rlr_cooldown", default=2, type=int, help="ReduceLROnPlateau Cooldown"
+    )
 
     parser.add_argument(
         "--start_train_epoch", default=1, type=int, help="Start training epoch"
     )
     parser.add_argument(
-        "--start_verify_epoch", default=51, type=int, help="Start verifying epoch" # Original: 200
+        "--start_verify_epoch",
+        default=51,
+        type=int,
+        help="Start verifying epoch",  # Original: 200
     )
-    parser.add_argument("--n_epochs", default=100, type=int, help="Epoch Num") # Original: 400
-    parser.add_argument("--if_retrain", default=True, type=bool, help="If Retrain") 
+    parser.add_argument(
+        "--n_epochs", default=100, type=int, help="Epoch Num"
+    )  # Original: 400
+    parser.add_argument("--if_retrain", default=True, type=bool, help="If Retrain")
     parser.add_argument("--if_onlytest", default=False, type=bool, help="If Only Test")
 
-    parser.add_argument("--if_fullprecision", default=True, type=bool, help="If Full Precision (disable AMP)")
+    parser.add_argument(
+        "--if_fullprecision",
+        default=True,
+        type=bool,
+        help="If Full Precision (disable AMP)",
+    )
 
-    parser.add_argument("--use_earlystop", default=False, type=bool, help="Use Early Stopping (when training)")
-    parser.add_argument("--earlystop_threshold", default=0.002, type=float, help="Early Stopping Threshold")
-    parser.add_argument("--earlystop_patience", default=30, type=int, help="Early Stopping Patience")
+    parser.add_argument(
+        "--use_earlystop",
+        default=False,
+        type=bool,
+        help="Use Early Stopping (when training)",
+    )
+    parser.add_argument(
+        "--earlystop_threshold",
+        default=0.002,
+        type=float,
+        help="Early Stopping Threshold",
+    )
+    parser.add_argument(
+        "--earlystop_patience", default=30, type=int, help="Early Stopping Patience"
+    )
 
     args, unknown = parser.parse_known_args()
 
@@ -274,23 +303,37 @@ if __name__ == "__main__":
         args.Dir_Weights = args.root_dir + "Weights/" + args.run_label + "/"
 
     if args.Image_Tr_txt is None:
-        args.Image_Tr_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Tr.txt"
+        args.Image_Tr_txt = (
+            args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Tr.txt"
+        )
     if args.Image_Va_txt is None:
-        args.Image_Va_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Va.txt"
+        args.Image_Va_txt = (
+            args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Va.txt"
+        )
     if args.Image_Te_txt is None:
-        args.Image_Te_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Te.txt"
+        args.Image_Te_txt = (
+            args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Te.txt"
+        )
 
     if args.Label_Tr_txt is None:
-        args.Label_Tr_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Tr.txt"
+        args.Label_Tr_txt = (
+            args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Tr.txt"
+        )
     if args.Label_Va_txt is None:
-        args.Label_Va_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Va.txt"
+        args.Label_Va_txt = (
+            args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Va.txt"
+        )
     if args.Label_Te_txt is None:
-        args.Label_Te_txt = args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Te.txt"
+        args.Label_Te_txt = (
+            args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Te.txt"
+        )
 
     if args.save_path is None:
         args.save_path = args.root_dir + "Results/" + args.run_label + "/DSCNet/"
     if args.save_path_max is None:
-        args.save_path_max = args.root_dir + "Results/" + args.run_label + "/DSCNet_max/"
+        args.save_path_max = (
+            args.root_dir + "Results/" + args.run_label + "/DSCNet_max/"
+        )
     if args.model_name is None:
         args.model_name = "DSCNet_" + args.run_label
     if args.model_name_max is None:
