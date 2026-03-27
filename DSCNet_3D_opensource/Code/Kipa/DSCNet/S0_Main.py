@@ -201,6 +201,13 @@ if __name__ == "__main__":
         "--n_basic_layer", default=16, type=int, help="basic layer numbers"
     )
     parser.add_argument("--dim", default=8, type=int, help="dim numbers")
+    parser.add_argument(
+        "--unet_layers",
+        default=4,
+        type=int,
+        choices=[3, 4, 5],
+        help="number of U-Net levels to use",
+    )
 
     # Training options
     parser.add_argument("--GPU_id", default="0", help="GPU ID")  # not in use

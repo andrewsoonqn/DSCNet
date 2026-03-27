@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from skimage.morphology import skeletonize, ball, dilation
 from sklearn.metrics import precision_score, recall_score, accuracy_score
-#from torchinfo import summary
+# from torchinfo import summary
 
 from S3_DSCNet import DSCNet
 from S3_Dataloader import Dataloader
@@ -119,10 +119,12 @@ def Get_logger(filename, verbosity=1, name=None):
 
     return logger
 
+
 def Close_logger(logger):
     for handler in logger.handlers[:]:
         handler.close()
         logger.removeHandler(handler)
+
 
 # Train process
 def Train_net(net, args):
@@ -141,19 +143,24 @@ def Train_net(net, args):
     train_dataset = Dataloader(args)
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2
-    ) #num_workers=8, persistent_workers=True (slower)
-    optimizer = torch.optim.AdamW(net.parameters(), lr=args.lr, betas=(0.9, 0.95)) # try weight_decay
+    )  # num_workers=8, persistent_workers=True (slower)
+    optimizer = torch.optim.AdamW(
+        net.parameters(), lr=args.lr, betas=(0.9, 0.95)
+    )  # try weight_decay
     # It is possible to choose whether to use a dynamic learning rate,
     # which was not used in our original experiment, but you can choose to use
-    scheduler = ReduceLROnPlateau( # original values: mode="min", factor=0.8, patience=50
-        optimizer, 
-        mode="max", 
-        factor=args.rlr_factor, 
-        threshold=args.rlr_threshold, 
-        patience=args.rlr_patience, 
-        cooldown=args.rlr_cooldown, 
-        min_lr=0.000001) 
-    
+    scheduler = (
+        ReduceLROnPlateau(  # original values: mode="min", factor=0.8, patience=50
+            optimizer,
+            mode="max",
+            factor=args.rlr_factor,
+            threshold=args.rlr_threshold,
+            patience=args.rlr_patience,
+            cooldown=args.rlr_cooldown,
+            min_lr=0.000001,
+        )
+    )
+
     criterion = cross_loss()
 
     dt = datetime.today()
@@ -182,7 +189,7 @@ def Train_net(net, args):
             net, train_dataloader, optimizer, criterion, epoch, args.n_epochs
         )
         torch.save(net.state_dict(), os.path.join(args.Dir_Weights, args.model_name))
-        #scheduler.step(loss)
+        # scheduler.step(loss)
 
         if epoch >= args.start_verify_epoch:
             net.load_state_dict(
@@ -194,7 +201,7 @@ def Train_net(net, args):
             dice_v, dice_a = Dice(args.Label_Va_txt, args.save_path)
             dice_v = np.mean(dice_v)
             dice_a = np.mean(dice_a)
-            #dice_mean = (dice_v + dice_a) / 2
+            # dice_mean = (dice_v + dice_a) / 2
             dice_mean = dice_v
             if dice_mean > dice_save:
                 dice_save = dice_mean
@@ -204,15 +211,15 @@ def Train_net(net, args):
                 )
             if dice_mean > dice_max + min_delta:
                 dice_max = dice_mean
-                #torch.save(
-                    #net.state_dict(),
-                    #os.path.join(args.Dir_Weights, args.model_name_max),
-                #)
+                # torch.save(
+                # net.state_dict(),
+                # os.path.join(args.Dir_Weights, args.model_name_max),
+                # )
                 counter = 0
             else:
                 counter += 1
             if args.use_rlrop:
-                scheduler.step(dice_mean) # for ReduceLROnPlateau
+                scheduler.step(dice_mean)  # for ReduceLROnPlateau
         logger.info(
             "Epoch:[{}/{}]  lr={:.6f}  loss={:.5f}  counter={} dice_mean={:.4f} "
             "max_dice={:.4f} saved_dice={:.4f}".format(
@@ -231,6 +238,7 @@ def Train_net(net, args):
             break
     logger.info("finish training!")
     Close_logger(logger)
+
 
 # Train process with AMP
 def Train_net_amp(net, args):
@@ -251,19 +259,22 @@ def Train_net_amp(net, args):
         train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2
     )
 
-    scaler = torch.amp.GradScaler(device="cuda") # for AMP implementation
+    scaler = torch.amp.GradScaler(device="cuda")  # for AMP implementation
 
     optimizer = torch.optim.AdamW(net.parameters(), lr=args.lr, betas=(0.9, 0.95))
     # It is possible to choose whether to use a dynamic learning rate,
     # which was not used in our original experiment, but you can choose to use
-    scheduler = ReduceLROnPlateau( # original values: mode="min", factor=0.8, patience=50
-        optimizer, 
-        mode="max", 
-        factor=args.rlr_factor, 
-        threshold=args.rlr_threshold, 
-        patience=args.rlr_patience, 
-        cooldown=args.rlr_cooldown, 
-        min_lr=0.000001) 
+    scheduler = (
+        ReduceLROnPlateau(  # original values: mode="min", factor=0.8, patience=50
+            optimizer,
+            mode="max",
+            factor=args.rlr_factor,
+            threshold=args.rlr_threshold,
+            patience=args.rlr_patience,
+            cooldown=args.rlr_cooldown,
+            min_lr=0.000001,
+        )
+    )
     criterion = cross_loss()
 
     dt = datetime.today()
@@ -299,12 +310,14 @@ def Train_net_amp(net, args):
                 torch.load(os.path.join(args.Dir_Weights, args.model_name))
             )
             # The validation set is selected according to the task
-            predict_amp(net, args.Image_Va_txt, args.Va_Meanstd_name, args.save_path, args)
+            predict_amp(
+                net, args.Image_Va_txt, args.Va_Meanstd_name, args.save_path, args
+            )
             # Calculate the Dice
             dice_v, dice_a = Dice(args.Label_Va_txt, args.save_path)
             dice_v = np.mean(dice_v)
             dice_a = np.mean(dice_a)
-            #dice_mean = (dice_v + dice_a) / 2
+            # dice_mean = (dice_v + dice_a) / 2
             dice_mean = dice_v
             if dice_mean > dice_save:
                 dice_save = dice_mean
@@ -335,6 +348,7 @@ def Train_net_amp(net, args):
             break
     logger.info("finish training!")
     Close_logger(logger)
+
 
 def read_file_from_txt(txt_path):  # 从txt里读取数据
     files = []
@@ -405,7 +419,14 @@ def predict(model, image_dir, meanstd_filename, save_path, args):
             + (a[2] - shape[2] // 2) ** 4
             + 1
         )
-        map_kernal = np.reshape(map_kernal, newshape=(1, 1,) + shape)
+        map_kernal = np.reshape(
+            map_kernal,
+            newshape=(
+                1,
+                1,
+            )
+            + shape,
+        )
 
         # print(np.max(map_kernal))
         image = image[np.newaxis, np.newaxis, :, :, :]
@@ -415,8 +436,13 @@ def predict(model, image_dir, meanstd_filename, save_path, args):
         for i in range(z // stride_x - 1):
             for j in range(y // stride_y - 1):
                 for k in range(x // stride_z - 1):
-                    image_i = image[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                              k * stride_z:k * stride_z + shape[2]]
+                    image_i = image[
+                        :,
+                        :,
+                        i * stride_x : i * stride_x + shape[0],
+                        j * stride_y : j * stride_y + shape[1],
+                        k * stride_z : k * stride_z + shape[2],
+                    ]
                     image_i = torch.from_numpy(image_i)
                     if torch.cuda.is_available():
                         image_i = image_i.cuda()
@@ -424,42 +450,88 @@ def predict(model, image_dir, meanstd_filename, save_path, args):
                         output = model(image_i)
                     output = output.data.cpu().numpy()
 
-                    predict[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                    k * stride_z:k * stride_z + shape[2]] += output * map_kernal
+                    predict[
+                        :,
+                        :,
+                        i * stride_x : i * stride_x + shape[0],
+                        j * stride_y : j * stride_y + shape[1],
+                        k * stride_z : k * stride_z + shape[2],
+                    ] += output * map_kernal
 
-                    n_map[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                    k * stride_z:k * stride_z + shape[2]] += map_kernal
+                    n_map[
+                        :,
+                        :,
+                        i * stride_x : i * stride_x + shape[0],
+                        j * stride_y : j * stride_y + shape[1],
+                        k * stride_z : k * stride_z + shape[2],
+                    ] += map_kernal
 
-                image_i = image[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                          x - shape[2]:x]
+                image_i = image[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    j * stride_y : j * stride_y + shape[1],
+                    x - shape[2] : x,
+                ]
                 image_i = torch.from_numpy(image_i)
                 if torch.cuda.is_available():
                     image_i = image_i.cuda()
                 with torch.no_grad():
                     output = model(image_i)
                 output = output.data.cpu().numpy()
-                predict[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                x - shape[2]:x] += output * map_kernal
+                predict[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    j * stride_y : j * stride_y + shape[1],
+                    x - shape[2] : x,
+                ] += output * map_kernal
 
-                n_map[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                x - shape[2]:x] += map_kernal
+                n_map[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    j * stride_y : j * stride_y + shape[1],
+                    x - shape[2] : x,
+                ] += map_kernal
 
             for k in range(x // stride_z - 1):
-                image_i = image[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y,
-                          k * stride_z:k * stride_z + shape[2]]
+                image_i = image[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    y - shape[1] : y,
+                    k * stride_z : k * stride_z + shape[2],
+                ]
                 image_i = torch.from_numpy(image_i)
                 if torch.cuda.is_available():
                     image_i = image_i.cuda()
                 with torch.no_grad():
                     output = model(image_i)
                 output = output.data.cpu().numpy()
-                predict[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y,
-                k * stride_z:k * stride_z + shape[2]] += output * map_kernal
+                predict[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    y - shape[1] : y,
+                    k * stride_z : k * stride_z + shape[2],
+                ] += output * map_kernal
 
-                n_map[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y,
-                k * stride_z:k * stride_z + shape[2]] += map_kernal
+                n_map[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    y - shape[1] : y,
+                    k * stride_z : k * stride_z + shape[2],
+                ] += map_kernal
 
-            image_i = image[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y, x - shape[2]:x]
+            image_i = image[
+                :,
+                :,
+                i * stride_x : i * stride_x + shape[0],
+                y - shape[1] : y,
+                x - shape[2] : x,
+            ]
             image_i = torch.from_numpy(image_i)
             if torch.cuda.is_available():
                 image_i = image_i.cuda()
@@ -467,13 +539,30 @@ def predict(model, image_dir, meanstd_filename, save_path, args):
                 output = model(image_i)
             output = output.data.cpu().numpy()
 
-            predict[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y, x - shape[2]:x] += output * map_kernal
-            n_map[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y, x - shape[2]:x] += map_kernal
+            predict[
+                :,
+                :,
+                i * stride_x : i * stride_x + shape[0],
+                y - shape[1] : y,
+                x - shape[2] : x,
+            ] += output * map_kernal
+            n_map[
+                :,
+                :,
+                i * stride_x : i * stride_x + shape[0],
+                y - shape[1] : y,
+                x - shape[2] : x,
+            ] += map_kernal
 
         for j in range(y // stride_y - 1):
             for k in range((x - shape[2]) // stride_z):
-                image_i = image[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-                          k * stride_z:k * stride_z + shape[2]]
+                image_i = image[
+                    :,
+                    :,
+                    z - shape[0] : z,
+                    j * stride_y : j * stride_y + shape[1],
+                    k * stride_z : k * stride_z + shape[2],
+                ]
                 image_i = torch.from_numpy(image_i)
                 if torch.cuda.is_available():
                     image_i = image_i.cuda()
@@ -481,14 +570,29 @@ def predict(model, image_dir, meanstd_filename, save_path, args):
                     output = model(image_i)
                 output = output.data.cpu().numpy()
 
-                predict[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-                k * stride_z:k * stride_z + shape[2]] += output * map_kernal
+                predict[
+                    :,
+                    :,
+                    z - shape[0] : z,
+                    j * stride_y : j * stride_y + shape[1],
+                    k * stride_z : k * stride_z + shape[2],
+                ] += output * map_kernal
 
-                n_map[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-                k * stride_z:k * stride_z + shape[2]] += map_kernal
+                n_map[
+                    :,
+                    :,
+                    z - shape[0] : z,
+                    j * stride_y : j * stride_y + shape[1],
+                    k * stride_z : k * stride_z + shape[2],
+                ] += map_kernal
 
-            image_i = image[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-                      x - shape[2]:x]
+            image_i = image[
+                :,
+                :,
+                z - shape[0] : z,
+                j * stride_y : j * stride_y + shape[1],
+                x - shape[2] : x,
+            ]
             image_i = torch.from_numpy(image_i)
             if torch.cuda.is_available():
                 image_i = image_i.cuda()
@@ -496,15 +600,30 @@ def predict(model, image_dir, meanstd_filename, save_path, args):
                 output = model(image_i)
             output = output.data.cpu().numpy()
 
-            predict[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-            x - shape[2]:x] += output * map_kernal
+            predict[
+                :,
+                :,
+                z - shape[0] : z,
+                j * stride_y : j * stride_y + shape[1],
+                x - shape[2] : x,
+            ] += output * map_kernal
 
-            n_map[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-            x - shape[2]:x] += map_kernal
+            n_map[
+                :,
+                :,
+                z - shape[0] : z,
+                j * stride_y : j * stride_y + shape[1],
+                x - shape[2] : x,
+            ] += map_kernal
 
         for k in range(x // stride_z - 1):
-            image_i = image[:, :, z - shape[0]:z, y - shape[1]:y,
-                      k * stride_z:k * stride_z + shape[2]]
+            image_i = image[
+                :,
+                :,
+                z - shape[0] : z,
+                y - shape[1] : y,
+                k * stride_z : k * stride_z + shape[2],
+            ]
             image_i = torch.from_numpy(image_i)
             if torch.cuda.is_available():
                 image_i = image_i.cuda()
@@ -512,13 +631,23 @@ def predict(model, image_dir, meanstd_filename, save_path, args):
                 output = model(image_i)
             output = output.data.cpu().numpy()
 
-            predict[:, :, z - shape[0]:z, y - shape[1]:y,
-            k * stride_z:k * stride_z + shape[2]] += output * map_kernal
+            predict[
+                :,
+                :,
+                z - shape[0] : z,
+                y - shape[1] : y,
+                k * stride_z : k * stride_z + shape[2],
+            ] += output * map_kernal
 
-            n_map[:, :, z - shape[0]:z, y - shape[1]:y,
-            k * stride_z:k * stride_z + shape[2]] += map_kernal
+            n_map[
+                :,
+                :,
+                z - shape[0] : z,
+                y - shape[1] : y,
+                k * stride_z : k * stride_z + shape[2],
+            ] += map_kernal
 
-        image_i = image[:, :, z - shape[0]:z, y - shape[1]:y, x - shape[2]:x]
+        image_i = image[:, :, z - shape[0] : z, y - shape[1] : y, x - shape[2] : x]
         image_i = torch.from_numpy(image_i)
         if torch.cuda.is_available():
             image_i = image_i.cuda()
@@ -526,8 +655,10 @@ def predict(model, image_dir, meanstd_filename, save_path, args):
             output = model(image_i)
         output = output.data.cpu().numpy()
 
-        predict[:, :, z - shape[0]:z, y - shape[1]:y, x - shape[2]:x] += output * map_kernal
-        n_map[:, :, z - shape[0]:z, y - shape[1]:y, x - shape[2]:x] += map_kernal
+        predict[:, :, z - shape[0] : z, y - shape[1] : y, x - shape[2] : x] += (
+            output * map_kernal
+        )
+        n_map[:, :, z - shape[0] : z, y - shape[1] : y, x - shape[2] : x] += map_kernal
 
         predict = predict / n_map
         predict = np.argmax(predict[0], axis=0)
@@ -539,6 +670,7 @@ def predict(model, image_dir, meanstd_filename, save_path, args):
         out.SetDirection(orig_direction)
         sitk.WriteImage(out, join(save_path, name))
     print("finish!")
+
 
 # Predict process (with AMP implementation)
 def predict_amp(model, image_dir, meanstd_filename, save_path, args):
@@ -594,7 +726,14 @@ def predict_amp(model, image_dir, meanstd_filename, save_path, args):
             + (a[2] - shape[2] // 2) ** 4
             + 1
         )
-        map_kernal = np.reshape(map_kernal, newshape=(1, 1,) + shape)
+        map_kernal = np.reshape(
+            map_kernal,
+            newshape=(
+                1,
+                1,
+            )
+            + shape,
+        )
 
         # print(np.max(map_kernal))
         image = image[np.newaxis, np.newaxis, :, :, :]
@@ -604,8 +743,13 @@ def predict_amp(model, image_dir, meanstd_filename, save_path, args):
         for i in range(z // stride_x - 1):
             for j in range(y // stride_y - 1):
                 for k in range(x // stride_z - 1):
-                    image_i = image[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                              k * stride_z:k * stride_z + shape[2]]
+                    image_i = image[
+                        :,
+                        :,
+                        i * stride_x : i * stride_x + shape[0],
+                        j * stride_y : j * stride_y + shape[1],
+                        k * stride_z : k * stride_z + shape[2],
+                    ]
                     image_i = torch.from_numpy(image_i)
                     if torch.cuda.is_available():
                         image_i = image_i.cuda()
@@ -614,14 +758,29 @@ def predict_amp(model, image_dir, meanstd_filename, save_path, args):
                             output = model(image_i)
                     output = output.data.cpu().numpy()
 
-                    predict[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                    k * stride_z:k * stride_z + shape[2]] += output * map_kernal
+                    predict[
+                        :,
+                        :,
+                        i * stride_x : i * stride_x + shape[0],
+                        j * stride_y : j * stride_y + shape[1],
+                        k * stride_z : k * stride_z + shape[2],
+                    ] += output * map_kernal
 
-                    n_map[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                    k * stride_z:k * stride_z + shape[2]] += map_kernal
+                    n_map[
+                        :,
+                        :,
+                        i * stride_x : i * stride_x + shape[0],
+                        j * stride_y : j * stride_y + shape[1],
+                        k * stride_z : k * stride_z + shape[2],
+                    ] += map_kernal
 
-                image_i = image[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                          x - shape[2]:x]
+                image_i = image[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    j * stride_y : j * stride_y + shape[1],
+                    x - shape[2] : x,
+                ]
                 image_i = torch.from_numpy(image_i)
                 if torch.cuda.is_available():
                     image_i = image_i.cuda()
@@ -629,15 +788,30 @@ def predict_amp(model, image_dir, meanstd_filename, save_path, args):
                     with torch.amp.autocast(device_type="cuda"):
                         output = model(image_i)
                 output = output.data.cpu().numpy()
-                predict[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                x - shape[2]:x] += output * map_kernal
+                predict[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    j * stride_y : j * stride_y + shape[1],
+                    x - shape[2] : x,
+                ] += output * map_kernal
 
-                n_map[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-                x - shape[2]:x] += map_kernal
+                n_map[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    j * stride_y : j * stride_y + shape[1],
+                    x - shape[2] : x,
+                ] += map_kernal
 
             for k in range(x // stride_z - 1):
-                image_i = image[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y,
-                          k * stride_z:k * stride_z + shape[2]]
+                image_i = image[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    y - shape[1] : y,
+                    k * stride_z : k * stride_z + shape[2],
+                ]
                 image_i = torch.from_numpy(image_i)
                 if torch.cuda.is_available():
                     image_i = image_i.cuda()
@@ -645,13 +819,29 @@ def predict_amp(model, image_dir, meanstd_filename, save_path, args):
                     with torch.amp.autocast(device_type="cuda"):
                         output = model(image_i)
                 output = output.data.cpu().numpy()
-                predict[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y,
-                k * stride_z:k * stride_z + shape[2]] += output * map_kernal
+                predict[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    y - shape[1] : y,
+                    k * stride_z : k * stride_z + shape[2],
+                ] += output * map_kernal
 
-                n_map[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y,
-                k * stride_z:k * stride_z + shape[2]] += map_kernal
+                n_map[
+                    :,
+                    :,
+                    i * stride_x : i * stride_x + shape[0],
+                    y - shape[1] : y,
+                    k * stride_z : k * stride_z + shape[2],
+                ] += map_kernal
 
-            image_i = image[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y, x - shape[2]:x]
+            image_i = image[
+                :,
+                :,
+                i * stride_x : i * stride_x + shape[0],
+                y - shape[1] : y,
+                x - shape[2] : x,
+            ]
             image_i = torch.from_numpy(image_i)
             if torch.cuda.is_available():
                 image_i = image_i.cuda()
@@ -660,13 +850,30 @@ def predict_amp(model, image_dir, meanstd_filename, save_path, args):
                     output = model(image_i)
             output = output.data.cpu().numpy()
 
-            predict[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y, x - shape[2]:x] += output * map_kernal
-            n_map[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y, x - shape[2]:x] += map_kernal
+            predict[
+                :,
+                :,
+                i * stride_x : i * stride_x + shape[0],
+                y - shape[1] : y,
+                x - shape[2] : x,
+            ] += output * map_kernal
+            n_map[
+                :,
+                :,
+                i * stride_x : i * stride_x + shape[0],
+                y - shape[1] : y,
+                x - shape[2] : x,
+            ] += map_kernal
 
         for j in range(y // stride_y - 1):
             for k in range((x - shape[2]) // stride_z):
-                image_i = image[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-                          k * stride_z:k * stride_z + shape[2]]
+                image_i = image[
+                    :,
+                    :,
+                    z - shape[0] : z,
+                    j * stride_y : j * stride_y + shape[1],
+                    k * stride_z : k * stride_z + shape[2],
+                ]
                 image_i = torch.from_numpy(image_i)
                 if torch.cuda.is_available():
                     image_i = image_i.cuda()
@@ -675,14 +882,29 @@ def predict_amp(model, image_dir, meanstd_filename, save_path, args):
                         output = model(image_i)
                 output = output.data.cpu().numpy()
 
-                predict[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-                k * stride_z:k * stride_z + shape[2]] += output * map_kernal
+                predict[
+                    :,
+                    :,
+                    z - shape[0] : z,
+                    j * stride_y : j * stride_y + shape[1],
+                    k * stride_z : k * stride_z + shape[2],
+                ] += output * map_kernal
 
-                n_map[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-                k * stride_z:k * stride_z + shape[2]] += map_kernal
+                n_map[
+                    :,
+                    :,
+                    z - shape[0] : z,
+                    j * stride_y : j * stride_y + shape[1],
+                    k * stride_z : k * stride_z + shape[2],
+                ] += map_kernal
 
-            image_i = image[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-                      x - shape[2]:x]
+            image_i = image[
+                :,
+                :,
+                z - shape[0] : z,
+                j * stride_y : j * stride_y + shape[1],
+                x - shape[2] : x,
+            ]
             image_i = torch.from_numpy(image_i)
             if torch.cuda.is_available():
                 image_i = image_i.cuda()
@@ -691,15 +913,30 @@ def predict_amp(model, image_dir, meanstd_filename, save_path, args):
                     output = model(image_i)
             output = output.data.cpu().numpy()
 
-            predict[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-            x - shape[2]:x] += output * map_kernal
+            predict[
+                :,
+                :,
+                z - shape[0] : z,
+                j * stride_y : j * stride_y + shape[1],
+                x - shape[2] : x,
+            ] += output * map_kernal
 
-            n_map[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-            x - shape[2]:x] += map_kernal
+            n_map[
+                :,
+                :,
+                z - shape[0] : z,
+                j * stride_y : j * stride_y + shape[1],
+                x - shape[2] : x,
+            ] += map_kernal
 
         for k in range(x // stride_z - 1):
-            image_i = image[:, :, z - shape[0]:z, y - shape[1]:y,
-                      k * stride_z:k * stride_z + shape[2]]
+            image_i = image[
+                :,
+                :,
+                z - shape[0] : z,
+                y - shape[1] : y,
+                k * stride_z : k * stride_z + shape[2],
+            ]
             image_i = torch.from_numpy(image_i)
             if torch.cuda.is_available():
                 image_i = image_i.cuda()
@@ -708,13 +945,23 @@ def predict_amp(model, image_dir, meanstd_filename, save_path, args):
                     output = model(image_i)
             output = output.data.cpu().numpy()
 
-            predict[:, :, z - shape[0]:z, y - shape[1]:y,
-            k * stride_z:k * stride_z + shape[2]] += output * map_kernal
+            predict[
+                :,
+                :,
+                z - shape[0] : z,
+                y - shape[1] : y,
+                k * stride_z : k * stride_z + shape[2],
+            ] += output * map_kernal
 
-            n_map[:, :, z - shape[0]:z, y - shape[1]:y,
-            k * stride_z:k * stride_z + shape[2]] += map_kernal
+            n_map[
+                :,
+                :,
+                z - shape[0] : z,
+                y - shape[1] : y,
+                k * stride_z : k * stride_z + shape[2],
+            ] += map_kernal
 
-        image_i = image[:, :, z - shape[0]:z, y - shape[1]:y, x - shape[2]:x]
+        image_i = image[:, :, z - shape[0] : z, y - shape[1] : y, x - shape[2] : x]
         image_i = torch.from_numpy(image_i)
         if torch.cuda.is_available():
             image_i = image_i.cuda()
@@ -723,8 +970,10 @@ def predict_amp(model, image_dir, meanstd_filename, save_path, args):
                 output = model(image_i)
         output = output.data.cpu().numpy()
 
-        predict[:, :, z - shape[0]:z, y - shape[1]:y, x - shape[2]:x] += output * map_kernal
-        n_map[:, :, z - shape[0]:z, y - shape[1]:y, x - shape[2]:x] += map_kernal
+        predict[:, :, z - shape[0] : z, y - shape[1] : y, x - shape[2] : x] += (
+            output * map_kernal
+        )
+        n_map[:, :, z - shape[0] : z, y - shape[1] : y, x - shape[2] : x] += map_kernal
 
         predict = predict / n_map
         predict = np.argmax(predict[0], axis=0)
@@ -752,7 +1001,7 @@ def load_with_upsample(pred_nifti_path, ref_nifti_path):
 
     # Load reference image parameters (for metadata + size reference)
     ref_img = sitk.ReadImage(ref_nifti_path)
-    ref_size = ref_img.GetSize() 
+    ref_size = ref_img.GetSize()
     ref_spacing = ref_img.GetSpacing()
     ref_origin = ref_img.GetOrigin()
     ref_direction = ref_img.GetDirection()
@@ -762,7 +1011,9 @@ def load_with_upsample(pred_nifti_path, ref_nifti_path):
     pred_size = pred_img.GetSize()
     pred_img.SetOrigin(ref_origin)
     pred_img.SetDirection(ref_direction)
-    new_spacing = tuple(ref_spacing[i] * (ref_size[i] / pred_size[i]) for i in range(3)) # setting scale for upsampling
+    new_spacing = tuple(
+        ref_spacing[i] * (ref_size[i] / pred_size[i]) for i in range(3)
+    )  # setting scale for upsampling
     pred_img.SetSpacing(new_spacing)
 
     # Resample back to original resolution (using nearest neighbor)
@@ -781,6 +1032,7 @@ def load_with_upsample(pred_nifti_path, ref_nifti_path):
 
     return upsampled_arr, groundtruth_arr
 
+
 def Dice(label_dir, pred_dir):
     # 获取image文件索引
     file = read_file_from_txt(label_dir)
@@ -792,7 +1044,7 @@ def Dice(label_dir, pred_dir):
     print("Dice:")
     for t in range(file_num):
         image_path = file[t]
-        name = image_path[image_path.rfind('/') + 1:]
+        name = image_path[image_path.rfind("/") + 1 :]
         predict = sitk.ReadImage(join(pred_dir, name))
         groundtruth = sitk.ReadImage(image_path)
 
@@ -827,6 +1079,7 @@ def Dice(label_dir, pred_dir):
 
     return dice_vein, dice_artery
 
+
 def clDice(label_dir, pred_dir, radius=1):
     file = read_file_from_txt(label_dir)
     file_num = len(file)
@@ -836,7 +1089,7 @@ def clDice(label_dir, pred_dir, radius=1):
     print("clDice:")
     for t in range(file_num):
         image_path = file[t]
-        name = image_path[image_path.rfind('/') + 1:]
+        name = image_path[image_path.rfind("/") + 1 :]
         predict = sitk.ReadImage(join(pred_dir, name))
         groundtruth = sitk.ReadImage(image_path)
 
@@ -846,13 +1099,11 @@ def clDice(label_dir, pred_dir, radius=1):
         else:
             predict, groundtruth = load_with_upsample(join(pred_dir, name), image_path)
 
-
         predict = predict.astype(bool)
         groundtruth = groundtruth.astype(bool)
 
         skel_predict = skeletonize(predict)
         skel_groundtruth = skeletonize(groundtruth)
-
 
         if radius > 0:
             selem = ball(radius) if predict.ndim == 3 else None
@@ -862,9 +1113,9 @@ def clDice(label_dir, pred_dir, radius=1):
             predict_dil = predict
             groundtruth_dil = groundtruth
 
-        #intersection = np.logical_and(skel_predict, skel_groundtruth).sum()
-        #size_predict = skel_predict.sum()
-        #size_groundtruth = skel_groundtruth.sum()
+        # intersection = np.logical_and(skel_predict, skel_groundtruth).sum()
+        # size_predict = skel_predict.sum()
+        # size_groundtruth = skel_groundtruth.sum()
 
         # Topology-aware coverage
         tpc = np.logical_and(skel_groundtruth, predict_dil).sum()
@@ -874,8 +1125,9 @@ def clDice(label_dir, pred_dir, radius=1):
 
         print(name, cl_Dice[i])
         i += 1
-    
+
     return cl_Dice
+
 
 def precision_recall_accuracy_score(label_dir, pred_dir):
     file = read_file_from_txt(label_dir)
@@ -888,7 +1140,7 @@ def precision_recall_accuracy_score(label_dir, pred_dir):
     print("Precision, Recall, Accuracy:")
     for t in range(file_num):
         image_path = file[t]
-        name = image_path[image_path.rfind('/') + 1:]
+        name = image_path[image_path.rfind("/") + 1 :]
         predict = sitk.ReadImage(join(pred_dir, name))
         groundtruth = sitk.ReadImage(image_path)
 
@@ -909,8 +1161,9 @@ def precision_recall_accuracy_score(label_dir, pred_dir):
         accuracy[i] = a
         print(name, precision[i], recall[i], accuracy[i])
         i += 1
-    
+
     return precision, recall, accuracy
+
 
 def Create_files(args):
     if not os.path.exists(args.save_path):
@@ -949,13 +1202,17 @@ def Predict_Network(net, args):
     logger = Get_logger(args.Dir_Log + log_name)
 
     logger.info("Start Prediction!")
-    predict(net, args.Image_Te_txt, args.Te_Meanstd_name, args.save_path_max, args) # Added torch.no_grad()
+    predict(
+        net, args.Image_Te_txt, args.Te_Meanstd_name, args.save_path_max, args
+    )  # Added torch.no_grad()
 
     dice = Dice(args.Label_Te_txt, args.save_path_max)
     dice_mean = np.mean(dice[0])
     cldice = clDice(args.Label_Te_txt, args.save_path_max)
     cldice_mean = np.mean(cldice)
-    precision, recall, accuracy = precision_recall_accuracy_score(args.Label_Te_txt, args.save_path_max)
+    precision, recall, accuracy = precision_recall_accuracy_score(
+        args.Label_Te_txt, args.save_path_max
+    )
     precision_mean = np.mean(precision)
     recall_mean = np.mean(recall)
     accuracy_mean = np.mean(accuracy)
@@ -971,7 +1228,7 @@ def Predict_Network(net, args):
     logger.info("Accuracy mean: " + str(accuracy_mean))
     logger.info("Finish!")
     Close_logger(logger)
-    
+
 
 # AMP implementation
 def Predict_Network_amp(net, args):
@@ -1004,13 +1261,17 @@ def Predict_Network_amp(net, args):
     logger = Get_logger(args.Dir_Log + log_name)
 
     logger.info("Start Prediction!")
-    predict_amp(net, args.Image_Te_txt, args.Te_Meanstd_name, args.save_path_max, args) # Added torch.no_grad()
+    predict_amp(
+        net, args.Image_Te_txt, args.Te_Meanstd_name, args.save_path_max, args
+    )  # Added torch.no_grad()
 
     dice = Dice(args.Label_Te_txt, args.save_path_max)
     dice_mean = np.mean(dice[0])
     cldice = clDice(args.Label_Te_txt, args.save_path_max)
     cldice_mean = np.mean(cldice)
-    precision, recall, accuracy = precision_recall_accuracy_score(args.Label_Te_txt, args.save_path_max)
+    precision, recall, accuracy = precision_recall_accuracy_score(
+        args.Label_Te_txt, args.save_path_max
+    )
     precision_mean = np.mean(precision)
     recall_mean = np.mean(recall)
     accuracy_mean = np.mean(accuracy)
@@ -1029,11 +1290,11 @@ def Predict_Network_amp(net, args):
 
 
 def Train(args):
-    #os.environ["CUDA_VISIBLE_DEVICES"] = args.GPU_id 
-    #removed above, replace with use of `export CUDA_VISIBLE_DEVICES=<num>` and `export OMP_NUM_THREADS=<num>` before running S0_Main.py
+    # os.environ["CUDA_VISIBLE_DEVICES"] = args.GPU_id
+    # removed above, replace with use of `export CUDA_VISIBLE_DEVICES=<num>` and `export OMP_NUM_THREADS=<num>` before running S0_Main.py
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("CUDA available:", torch.cuda.is_available())
-    
+
     net = DSCNet(
         n_channels=args.n_channels,
         n_classes=args.n_classes,
@@ -1043,9 +1304,10 @@ def Train(args):
         device=device,
         number=args.n_basic_layer,
         dim=args.dim,
+        unet_layers=args.unet_layers,
     )
     Create_files(args)
-    #summary(net, input_size=(1, C, H, W), device=net.device)
+    # summary(net, input_size=(1, C, H, W), device=net.device)
     if not args.if_fullprecision:
         if not args.if_onlytest:
             Train_net_amp(net, args)
@@ -1058,6 +1320,3 @@ def Train(args):
             Predict_Network(net, args)
         else:
             Predict_Network(net, args)
-
-
-
