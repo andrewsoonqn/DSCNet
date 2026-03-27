@@ -139,11 +139,17 @@ echo ""
 #                          RUN THE PIPELINE                                   #
 ###############################################################################
 
-CMD="python ${PROJECT_DIR}/DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py"
+# Change these for quick experiments.
+UNET_LAYERS="${UNET_LAYERS:-4}"
+RUN_LABEL="${RUN_LABEL:-Test_Run_unet${UNET_LAYERS}}"
+
+CMD="python ${PROJECT_DIR}/DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label ${RUN_LABEL} --unet_layers ${UNET_LAYERS}"
 
 echo "========================================================================"
 echo "  Executing pipeline"
 echo "========================================================================"
+echo "  U-Net layers: ${UNET_LAYERS}"
+echo "  Run label   : ${RUN_LABEL}"
 echo "  Command: ${CMD}"
 echo "  Started: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================================================"
