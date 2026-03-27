@@ -11,7 +11,7 @@
 #SBATCH --cpus-per-task=8
 
 # ─── Time limit ─────────────────────────────────────────────────────────
-#SBATCH --time=8:00:00
+#SBATCH --time=48:00:00
 
 # ─── Email notifications (optional — edit or remove) ────────────────────
 #SBATCH --mail-type=BEGIN,END,FAIL
