@@ -20,8 +20,10 @@ class Conv(nn.Module):
 class DCN_Conv(nn.Module):
     def __init__(self, in_ch, out_ch, kernel_size, extend_scope, morph, if_offset, device):
         super(DCN_Conv, self).__init__()
-        self.kernel_size = 3
-        self.offset_conv = nn.Conv3d(in_ch, 3 * self.kernel_size, 3, padding=1)
+        # hardcoded for kernel_size = 5
+        self.kernel_size = 5
+        self.offset_conv3 = nn.Conv3d(in_ch, 3, 3, padding=1)
+        self.offset_conv5 = nn.Conv3d(3, 3, 3, padding=1)
         self.bn = nn.BatchNorm3d(3 * self.kernel_size) # Normalizes across the Channel dimension; returns same shape as input
         self.device = device
 
@@ -40,7 +42,11 @@ class DCN_Conv(nn.Module):
 
     def forward(self, f):
         # Input: [N, C, D, W, H];
-        offset = self.offset_conv(f) # Output: [N, 3*C, D, W, H];
+        offset0 = torch.zeros(f.size(dim=0), 3, f.size(dim=2), f.size(dim=3), f.size(dim=4))
+        offset0 = offset0.to(self.device)
+        offset3 = self.offset_conv3(f)
+        offset5 = self.offset_conv5(offset3)
+        offset = torch.concat([offset5, offset3, offset0, offset3, offset5], dim=1) # Output: [N, 3*C, D, W, H]
         offset = self.bn(offset) # Output: [N, 3*C, D, W, H];
         offset = torch.tanh(offset) # Output: [N, 3*C, D, W, H]; tanh is (-1, 1)
         input_shape = f.shape # shape: [N, C, D, W, H];
@@ -151,10 +157,10 @@ class DCN(object):
                 y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4) # [C, N, D, W, H]
                 z_offset1 = z_offset1.permute(1, 0, 2, 3, 4) # [C, N, D, W, H]
                 y_offset1 = y_offset1.permute(1, 0, 2, 3, 4) # [C, N, D, W, H]
-                center = int(self.num_points // 2)
-                z_offset1_new[center] = 0
-                y_offset1_new[center] = 0
-                for index in range(1, center + 1):
+                center = int(self.num_points // 2) # 2
+                #z_offset1_new[center] = 0
+                #y_offset1_new[center] = 0
+                for index in range(1, center + 1): # 1, 2 (kernel is 0, 1, center, 3, 4 -> size 5)
                     z_offset1_new[center + index] = z_offset1_new[center + index - 1] + z_offset1[center + index] # next offset is dependent on previous
                     z_offset1_new[center - index] = z_offset1_new[center - index + 1] + z_offset1[center - index]
                     y_offset1_new[center + index] = y_offset1_new[center + index - 1] + y_offset1[center + index]
@@ -218,8 +224,8 @@ class DCN(object):
                 x_offset1 = x_offset1.permute(1, 0, 2, 3, 4)
                 z_offset1 = z_offset1.permute(1, 0, 2, 3, 4)
                 center = int(self.num_points // 2)
-                x_offset1_new[center] = 0
-                z_offset1_new[center] = 0
+                #x_offset1_new[center] = 0
+                #z_offset1_new[center] = 0
                 for index in range(1, center + 1):
                     x_offset1_new[center + index] = x_offset1_new[center + index - 1] + x_offset1[center + index]
                     x_offset1_new[center - index] = x_offset1_new[center - index + 1] + x_offset1[center - index]
@@ -281,8 +287,8 @@ class DCN(object):
                 x_offset1 = x_offset1.permute(1, 0, 2, 3, 4)
                 y_offset1 = y_offset1.permute(1, 0, 2, 3, 4)
                 center = int(self.num_points // 2)
-                x_offset1_new[center] = 0
-                y_offset1_new[center] = 0
+                #x_offset1_new[center] = 0
+                #y_offset1_new[center] = 0
                 for index in range(1, center + 1):
                     x_offset1_new[center + index] = x_offset1_new[center + index - 1] + x_offset1[center + index]
                     x_offset1_new[center - index] = x_offset1_new[center - index + 1] + x_offset1[center - index]

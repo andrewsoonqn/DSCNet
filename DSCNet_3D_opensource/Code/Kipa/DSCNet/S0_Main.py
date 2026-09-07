@@ -4,7 +4,7 @@ import argparse
 
 from S1_Pre_Getmeanstd import Getmeanstd
 from S2_Pre_Generate_Txt import Generate_Txt
-from S3_Train_Process import Train
+from S3_Train_Process import Train as train_standard
 
 """
 This code contains all the "Parameters" for the entire project -- <DSCNet>
@@ -57,8 +57,13 @@ def Process(args):
     Generate_Txt(args.Va_Label_dir, args.Label_Va_txt)
     Generate_Txt(args.Te_Label_dir, args.Label_Te_txt)
 
-    # Step 3: Train the "Network"
-    Train(args)
+    # Step 3: Train the network
+    if args.training_pipeline == "optimized":
+        from S3_Optimized_Train_Process import Train as train_optimized
+
+        train_optimized(args)
+    else:
+        train_standard(args)
 
 
 if __name__ == "__main__":
@@ -206,7 +211,13 @@ if __name__ == "__main__":
         default=4,
         type=int,
         choices=[3, 4, 5],
-        help="number of U-Net levels to use",
+        help="number of U-Net levels to use in the standard pipeline",
+    )
+    parser.add_argument(
+        "--training_pipeline",
+        default="standard",
+        choices=["standard", "optimized"],
+        help="training implementation to use",
     )
 
     # Training options
@@ -218,7 +229,44 @@ if __name__ == "__main__":
         "--ROI_shape", default=(64, 64, 64), type=int, help="roi size"
     )  # Original: 128, 96, 96
     parser.add_argument("--batch_size", default=1, type=int, help="batch size")
+    parser.add_argument(
+        "--sample_count",
+        default=1,
+        type=int,
+        help="number of times each image is sampled per epoch",
+    )
+    parser.add_argument(
+        "--predict_batch_size",
+        default=4,
+        type=int,
+        help="number of inference patches processed together",
+    )
     parser.add_argument("--lr", default=1e-4, type=float, help="learning rate")
+    parser.add_argument("--min_lr", default=5e-6, type=float, help="minimum learning rate")
+    parser.add_argument(
+        "--poly_decay_power",
+        default=0.9,
+        type=float,
+        help="polynomial learning-rate decay power",
+    )
+    parser.add_argument(
+        "--beta",
+        default=1e-2,
+        type=float,
+        help="initial entropy-regularization weight",
+    )
+    parser.add_argument(
+        "--min_beta",
+        default=1e-6,
+        type=float,
+        help="minimum entropy-regularization weight",
+    )
+    parser.add_argument(
+        "--beta_decay_power",
+        default=2.0,
+        type=float,
+        help="polynomial entropy-weight decay power",
+    )
 
     parser.add_argument(
         "--use_rlrop",
@@ -251,6 +299,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_epochs", default=100, type=int, help="Epoch Num"
     )  # Original: 400
+    parser.add_argument(
+        "--verify_gap", default=1, type=int, help="validate every N epochs"
+    )
     parser.add_argument("--if_retrain", default=True, type=bool, help="If Retrain")
     parser.add_argument("--if_onlytest", default=False, type=bool, help="If Only Test")
 

@@ -88,7 +88,7 @@ For activating environment on server:
 
 - `source DSCNetEnv/bin/activate`
 
-For installing requirements (`requirements0.txt` for Jon's laptop, `requirements_1.txt` for Jon's desktop, `requirements2.txt` for Jon's server configuration, try the above or create your own `requirements.txt` file):
+For installing requirements (`requirements0.txt` for Jon's laptop, `requirements1.txt` for Jon's desktop, `requirements2.txt` for Jon's server configuration, try the above or create your own `requirements.txt` file):
 
 - `pip install -r requirements<X>.txt`
 

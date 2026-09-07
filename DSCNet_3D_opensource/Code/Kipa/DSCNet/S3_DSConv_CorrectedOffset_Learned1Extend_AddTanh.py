@@ -24,16 +24,10 @@ class DCN_Conv(nn.Module):
         self.offset_conv = nn.Conv3d(in_ch, 3 * self.kernel_size, 3, padding=1)
         self.bn = nn.BatchNorm3d(3 * self.kernel_size) # Normalizes across the Channel dimension; returns same shape as input
         self.device = device
-        
+
         self.extend_conv = nn.Conv3d(in_ch, self.kernel_size, 3, padding=1)
         self.exbn = nn.BatchNorm3d(self.kernel_size)
-        self.sigmoid = nn.Sigmoid()
-
-        #self.feature_conv = nn.Conv3d(in_ch, in_ch, 3, padding=1)
-        self.featurebn = nn.BatchNorm3d(in_ch)
-        self.feature_conv_x = nn.Conv3d(in_ch, in_ch, kernel_size=(1, 1, 3), padding=(0, 0, 1))
-        self.feature_conv_y = nn.Conv3d(in_ch, in_ch, kernel_size=(1, 3, 1), padding=(0, 1, 0))
-        self.feature_conv_z = nn.Conv3d(in_ch, in_ch, kernel_size=(3, 1, 1), padding=(1, 0, 0))
+        #self.sigmoid = nn.Sigmoid()
 
         self.if_offset = if_offset
         self.morph = morph
@@ -57,33 +51,11 @@ class DCN_Conv(nn.Module):
 
         extend1 = self.extend_conv(f)
         extend1 = self.exbn(extend1)
-        extend1 = self.sigmoid(extend1)
-        #extend1 = extend1.mul(0.5)
+        extend1 = torch.tanh(extend1)
+        extend1 = 0.5 * extend1
 
-        #extend2 = self.extend_conv(f)
-        #extend2 = self.exbn(extend2)
-        #extend2 = self.sigmoid(extend2)
-        #extend2 = extend2.add(1)
-
-        #feature = self.feature_conv(f)
-        #feature = self.featurebn(feature)
-        #feature = self.relu(feature)
-
-        if self.morph == 0:
-            feature = self.feature_conv_x(f)
-            feature = self.featurebn(feature)
-            feature = self.relu(feature)
-        elif self.morph == 1:
-            feature = self.feature_conv_y(f)
-            feature = self.featurebn(feature)
-            feature = self.relu(feature)
-        else:
-            feature = self.feature_conv_z(f)
-            feature = self.featurebn(feature)
-            feature = self.relu(feature)
-        
         dcn = DCN(input_shape, self.kernel_size, self.extend_scope, self.morph, self.device)
-        deformed_feature = dcn.deform_conv(feature, offset, self.if_offset, extend1, extend1) # _coordinate_map_3D (Output: [N, D, W, H*K] OR [N, D, W*K, H] OR [N, D*K, W, H]) + _bilinear_interpolate_3D (Output: [N, C, D, W, H*K] etc.)
+        deformed_feature = dcn.deform_conv(f, offset, self.if_offset, extend1) # _coordinate_map_3D (Output: [N, D, W, H*K] OR [N, D, W*K, H] OR [N, D*K, W, H]) + _bilinear_interpolate_3D (Output: [N, C, D, W, H*K] etc.)
 
         # Only ever does one of the following
         if self.morph == 0:
@@ -120,7 +92,7 @@ class DCN(object):
     output: [N,1,K,K*W,H]   coordinate map
     output: [N,1,D,W,K*H]   coordinate map
     '''
-    def _coordinate_map_3D(self, offset, if_offset, extend1, extend2):
+    def _coordinate_map_3D(self, offset, if_offset, extend1):
         # offset
         #offset1, offset2 = torch.split(offset, 3 * self.num_points, dim=1) # Split offset into groups of 3*self.num_points i.e. [N, 3*K, D, W, H]
         z_offset1, y_offset1, x_offset1 = torch.split(offset, self.num_points, dim=1) # Split offset1 into groups of self.num_points i.e. [N, K, D, W, H]
@@ -166,7 +138,7 @@ class DCN(object):
 
             x_grid = x_spread.repeat([1, self.depth * self.width * self.height])
             x_grid = x_grid.reshape([self.num_points, self.depth, self.width, self.height])
-            x_grid = x_grid.unsqueeze(0)  # [1, K, D, W, H] C running from -self.num_points//2 to self.num_points//2
+            x_grid = x_grid.unsqueeze(0)  # [1, K, D, W, H] K running from -self.num_points//2 to self.num_points//2
 
             z_new = z_center + z_grid # [1, K, D, W, H] 0 to depth in the D axis
             y_new = y_center + y_grid # [1, K, D, W, H] 0 to width in the W axis
@@ -182,25 +154,50 @@ class DCN(object):
 
             z_offset1_new = z_offset1.detach().clone() # detach ensures that gradients do not propagate from z_offset1_new to z_offset1; clone creates an independent matrix in memory
             y_offset1_new = y_offset1.detach().clone() # detach ensures that gradients do not propagate from y_offset1_new to y_offset1; clone creates an independent matrix in memory
-
+            extend1_new = extend1.detach().clone()
+            
             if if_offset:
                 z_offset1_new = z_offset1_new.permute(1, 0, 2, 3, 4) # [K, N, D, W, H] why? offset in channel direction.
                 y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4) # [K, N, D, W, H]
+                extend1_new = extend1_new.permute(1, 0, 2, 3, 4)
                 z_offset1 = z_offset1.permute(1, 0, 2, 3, 4) # [K, N, D, W, H]
                 y_offset1 = y_offset1.permute(1, 0, 2, 3, 4) # [K, N, D, W, H]
+                extend1 = extend1.permute(1, 0, 2, 3, 4)
                 center = int(self.num_points // 2)
                 z_offset1_new[center] = 0
                 y_offset1_new[center] = 0
+                extend1_new[center] = 0
                 for index in range(1, center + 1):
-                    z_offset1_new[center + index] = z_offset1_new[center + index - 1] + z_offset1[center + index] # next offset is dependent on previous
-                    z_offset1_new[center - index] = z_offset1_new[center - index + 1] + z_offset1[center - index]
-                    y_offset1_new[center + index] = y_offset1_new[center + index - 1] + y_offset1[center + index]
-                    y_offset1_new[center - index] = y_offset1_new[center - index + 1] + y_offset1[center - index]
+                    src_pos_z = z_offset1[center + index, :, :, :, index:]  # shape [N, D, W, H - index]
+                    padded_pos_z = torch.nn.functional.pad(src_pos_z, (0, index, 0, 0, 0, 0))  # pad H dim at end
+                    z_offset1_new[center + index] = z_offset1_new[center + index - 1] + padded_pos_z
+                    
+                    src_neg_z = z_offset1[center - index, :, :, :, :self.height-index]  # shape [N, D, W, H - index]
+                    padded_neg_z = torch.nn.functional.pad(src_neg_z, (index, 0, 0, 0, 0, 0))  # pad H dim at start
+                    z_offset1_new[center - index] = z_offset1_new[center - index + 1] + padded_neg_z
+
+                    src_pos_y = y_offset1[center + index, :, :, :, index:]  # shape [N, D, W, H - index]
+                    padded_pos_y = torch.nn.functional.pad(src_pos_y, (0, index, 0, 0, 0, 0))  # pad H dim at end
+                    y_offset1_new[center + index] = y_offset1_new[center + index - 1] + padded_pos_y
+                    
+                    src_neg_y = y_offset1[center - index, :, :, :, :self.height-index]  # shape [N, D, W, H - index]
+                    padded_neg_y = torch.nn.functional.pad(src_neg_y, (index, 0, 0, 0, 0, 0))  # pad H dim at start
+                    y_offset1_new[center - index] = y_offset1_new[center - index + 1] + padded_neg_y
+
+                    extend1_pos = extend1[center - index, :, :, :, index:]
+                    padded_extend1_pos = torch.nn.functional.pad(extend1_pos, (0, index, 0, 0, 0, 0))
+                    extend1_new[center + index] = padded_extend1_pos
+
+                    extend1_neg = extend1[center - index, :, :, :, :self.height-index]
+                    padded_extend1_neg = torch.nn.functional.pad(extend1_neg, (index, 0, 0, 0, 0, 0))
+                    extend1_new[center - index] = padded_extend1_neg
+
                 z_offset1_new = z_offset1_new.permute(1, 0, 2, 3, 4).to(self.device) # [N, K, D, W, H]
                 y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4).to(self.device) # [N, K, D, W, H]
+                extend1_new = extend1_new.permute(1, 0, 2, 3, 4).to(self.device)
                 z_new = z_new.add(z_offset1_new.mul(self.extend_scope)) # multiply new offsets by self.extend_scope, then add z_offset1_new to z_new (which is all zeros except for depth)
                 y_new = y_new.add(y_offset1_new.mul(self.extend_scope)) # multiply new offsets by self.extend_scope, then add y_offset1_new to y_new (which is all zeros except for width)
-                x_new = x_new.add(extend1)
+                x_new = x_new.add(extend1_new)
 
                 z_new = z_new.reshape([self.num_batch, 1, 1, self.num_points, self.depth, self.width, self.height]) # [N, 1, 1, K, D, W, H]
                 z_new = z_new.permute(0, 4, 1, 5, 2, 6, 3) # [N, D, 1, W, 1, H, K]
@@ -249,25 +246,51 @@ class DCN(object):
             x_new = x_new.to(self.device)
             x_offset1_new = x_offset1.detach().clone()
             z_offset1_new = z_offset1.detach().clone()
+            extend1_new = extend1.detach().clone()
 
             if if_offset:
                 x_offset1_new = x_offset1_new.permute(1, 0, 2, 3, 4)
                 z_offset1_new = z_offset1_new.permute(1, 0, 2, 3, 4)
+                extend1_new = extend1_new.permute(1, 0, 2, 3, 4)
                 x_offset1 = x_offset1.permute(1, 0, 2, 3, 4)
                 z_offset1 = z_offset1.permute(1, 0, 2, 3, 4)
+                extend1 = extend1.permute(1, 0, 2, 3, 4)
                 center = int(self.num_points // 2)
                 x_offset1_new[center] = 0
                 z_offset1_new[center] = 0
+                extend1_new[center] = 0
                 for index in range(1, center + 1):
-                    x_offset1_new[center + index] = x_offset1_new[center + index - 1] + x_offset1[center + index]
-                    x_offset1_new[center - index] = x_offset1_new[center - index + 1] + x_offset1[center - index]
-                    z_offset1_new[center + index] = z_offset1_new[center + index - 1] + z_offset1[center + index]
-                    z_offset1_new[center - index] = z_offset1_new[center - index + 1] + z_offset1[center - index]
+                    src_pos_x = x_offset1[center + index, :, :, index:, :]  # shape [N, D, W - index, H]
+                    padded_pos_x = torch.nn.functional.pad(src_pos_x, (0, 0, 0, index, 0, 0))  # pad W dim at end
+                    x_offset1_new[center + index] = x_offset1_new[center + index - 1] + padded_pos_x
+                    
+                    src_neg_x = x_offset1[center - index, :, :, :self.width-index, :]  # shape [N, D, W - index, H]
+                    padded_neg_x = torch.nn.functional.pad(src_neg_x, (0, 0, index, 0, 0, 0))  # pad W dim at start
+                    x_offset1_new[center - index] = x_offset1_new[center - index + 1] + padded_neg_x
+
+                    src_pos_z = z_offset1[center + index, :, :, index:, :]  # shape [N, D, W - index, H]
+                    padded_pos_z = torch.nn.functional.pad(src_pos_z, (0, 0, 0, index, 0, 0))  # pad W dim at end
+                    z_offset1_new[center + index] = z_offset1_new[center + index - 1] + padded_pos_z
+                    
+                    src_neg_z = z_offset1[center - index, :, :, :self.width-index, :]  # shape [N, D, W - index, H]
+                    padded_neg_z = torch.nn.functional.pad(src_neg_z, (0, 0, index, 0, 0, 0))  # pad W dim at start
+                    z_offset1_new[center - index] = z_offset1_new[center - index + 1] + padded_neg_z
+
+                    extend1_pos = extend1[center - index, :, :, index:, :]
+                    padded_extend1_pos = torch.nn.functional.pad(extend1_pos, (0, 0, 0, index, 0, 0))
+                    extend1_new[center + index] = padded_extend1_pos
+
+                    extend1_neg = extend1[center - index, :, :, :self.width-index, :]
+                    padded_extend1_neg = torch.nn.functional.pad(extend1_neg, (0, 0, index, 0, 0, 0))
+                    extend1_new[center - index] = padded_extend1_neg
+
                 x_offset1_new = x_offset1_new.permute(1, 0, 2, 3, 4).to(self.device)
                 z_offset1_new = z_offset1_new.permute(1, 0, 2, 3, 4).to(self.device)
+                extend1_new = extend1_new.permute(1, 0, 2, 3, 4).to(self.device)
                 z_new = z_new.add(z_offset1_new.mul(self.extend_scope))
                 x_new = x_new.add(x_offset1_new.mul(self.extend_scope))
-                y_new = y_new.add(extend1)
+                y_new = y_new.add(extend1_new)
+
             z_new = z_new.reshape([self.num_batch, 1, self.num_points, 1, self.depth, self.width, self.height])
             z_new = z_new.permute(0, 4, 1, 5, 2, 6, 3)
             z_new = z_new.reshape([self.num_batch, self.depth, self.num_points * self.width, self.height])
@@ -313,25 +336,50 @@ class DCN(object):
             x_new = x_new.to(self.device)
             x_offset1_new = x_offset1.detach().clone()
             y_offset1_new = y_offset1.detach().clone()
+            extend1_new = extend1.detach().clone()
 
             if if_offset:
                 x_offset1_new = x_offset1_new.permute(1, 0, 2, 3, 4)
                 y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4)
+                extend1_new = extend1_new.permute(1, 0, 2, 3, 4)
                 x_offset1 = x_offset1.permute(1, 0, 2, 3, 4)
                 y_offset1 = y_offset1.permute(1, 0, 2, 3, 4)
+                extend1 = extend1.permute(1, 0, 2, 3, 4)
                 center = int(self.num_points // 2)
                 x_offset1_new[center] = 0
                 y_offset1_new[center] = 0
+                extend1_new[center] = 0
                 for index in range(1, center + 1):
-                    x_offset1_new[center + index] = x_offset1_new[center + index - 1] + x_offset1[center + index]
-                    x_offset1_new[center - index] = x_offset1_new[center - index + 1] + x_offset1[center - index]
-                    y_offset1_new[center + index] = y_offset1_new[center + index - 1] + y_offset1[center + index]
-                    y_offset1_new[center - index] = y_offset1_new[center - index + 1] + y_offset1[center - index]
+                    src_pos_x = x_offset1[center + index, :, index:, :, :]  # shape [N, D-index, W, H]
+                    padded_pos_x = torch.nn.functional.pad(src_pos_x, (0, 0, 0, 0, 0, index))  # pad D dim at end
+                    x_offset1_new[center + index] = x_offset1_new[center + index - 1] + padded_pos_x
+                    
+                    src_neg_x = x_offset1[center - index, :, :self.depth-index, :, :]  # shape [N, D-index, W, H]
+                    padded_neg_x = torch.nn.functional.pad(src_neg_x, (0, 0, 0, 0, index, 0))  # pad D dim at start
+                    x_offset1_new[center - index] = x_offset1_new[center - index + 1] + padded_neg_x
+
+                    src_pos_y = y_offset1[center + index, :, index:, :, :]  # shape [N, D-index, W, H]
+                    padded_pos_y = torch.nn.functional.pad(src_pos_y, (0, 0, 0, 0, 0, index))  # pad D dim at end
+                    y_offset1_new[center + index] = y_offset1_new[center + index - 1] + padded_pos_y
+                    
+                    src_neg_y = y_offset1[center - index, :, :self.depth-index, :, :]  # shape [N, D-index, W, H]
+                    padded_neg_y = torch.nn.functional.pad(src_neg_y, (0, 0, 0, 0, index, 0))  # pad D dim at start
+                    y_offset1_new[center - index] = y_offset1_new[center - index + 1] + padded_neg_y
+
+                    extend1_pos = extend1[center - index, :, index:, :, :]
+                    padded_extend1_pos = torch.nn.functional.pad(extend1_pos, (0, 0, 0, 0, 0, index))
+                    extend1_new[center + index] = padded_extend1_pos
+
+                    extend1_neg = extend1[center - index, :, :self.depth-index, :, :]
+                    padded_extend1_neg = torch.nn.functional.pad(extend1_neg, (0, 0, 0, 0, index, 0))
+                    extend1_new[center - index] = padded_extend1_neg
+
                 x_offset1_new = x_offset1_new.permute(1, 0, 2, 3, 4).to(self.device)
                 y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4).to(self.device)
+                extend1_new = extend1_new.permute(1, 0, 2, 3, 4).to(self.device)
                 x_new = x_new.add(x_offset1_new.mul(self.extend_scope))
                 y_new = y_new.add(y_offset1_new.mul(self.extend_scope))
-                z_new = z_new.add(extend1)
+                z_new = z_new.add(extend1_new)
 
             z_new = z_new.reshape([self.num_batch, self.num_points, 1, 1, self.depth, self.width, self.height])
             z_new = z_new.permute(0, 4, 1, 5, 2, 6, 3)
@@ -468,7 +516,7 @@ class DCN(object):
             outputs = outputs.permute(0, 4, 1, 2, 3)
         return outputs
 
-    def deform_conv(self, input, offset, if_offset, extend1, extend2):
-        z, y, x = self._coordinate_map_3D(offset, if_offset, extend1, extend2)
+    def deform_conv(self, input, offset, if_offset, extend1):
+        z, y, x = self._coordinate_map_3D(offset, if_offset, extend1)
         deformed_feature = self._bilinear_interpolate_3D(input, z, y, x)
         return deformed_feature

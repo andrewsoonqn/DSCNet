@@ -24,26 +24,19 @@ class DCN_Conv(nn.Module):
         self.offset_conv = nn.Conv3d(in_ch, 3 * self.kernel_size, 3, padding=1)
         self.bn = nn.BatchNorm3d(3 * self.kernel_size) # Normalizes across the Channel dimension; returns same shape as input
         self.device = device
-        
-        self.extend_conv = nn.Conv3d(in_ch, self.kernel_size, 3, padding=1)
-        self.exbn = nn.BatchNorm3d(self.kernel_size)
-        self.sigmoid = nn.Sigmoid()
-
-        #self.feature_conv = nn.Conv3d(in_ch, in_ch, 3, padding=1)
-        self.featurebn = nn.BatchNorm3d(in_ch)
-        self.feature_conv_x = nn.Conv3d(in_ch, in_ch, kernel_size=(1, 1, 3), padding=(0, 0, 1))
-        self.feature_conv_y = nn.Conv3d(in_ch, in_ch, kernel_size=(1, 3, 1), padding=(0, 1, 0))
-        self.feature_conv_z = nn.Conv3d(in_ch, in_ch, kernel_size=(3, 1, 1), padding=(1, 0, 0))
 
         self.if_offset = if_offset
         self.morph = morph
         self.extend_scope = extend_scope
 
-        self.dcn_conv_x = nn.Conv3d(in_ch, out_ch, kernel_size=(1, 1, self.kernel_size), stride=(1, 1, self.kernel_size), padding=0)  # conv in x-direction
-        self.dcn_conv_y = nn.Conv3d(in_ch, out_ch, kernel_size=(1, self.kernel_size, 1), stride=(1, self.kernel_size, 1), padding=0)  # conv in y-direction
-        self.dcn_conv_z = nn.Conv3d(in_ch, out_ch, kernel_size=(self.kernel_size, 1, 1), stride=(self.kernel_size, 1, 1), padding=0)  # conv in z-direction
+        self.weights_conv = nn.Conv3d(in_ch, self.kernel_size, self.kernel_size, padding=self.kernel_size//2)
+        self.weightsbn = nn.BatchNorm3d(self.kernel_size)
 
-        #self.dcn_conv = nn.Conv3d(in_ch, out_ch, kernel_size=self.kernel_size, stride=self.kernel_size, padding=0)
+        #self.dcn_conv_x = nn.Conv3d(in_ch, out_ch, kernel_size=(1, 1, self.kernel_size), stride=(1, 1, self.kernel_size), padding=0)  # conv in x-direction
+        #self.dcn_conv_y = nn.Conv3d(in_ch, out_ch, kernel_size=(1, self.kernel_size, 1), stride=(1, self.kernel_size, 1), padding=0)  # conv in y-direction
+        #self.dcn_conv_z = nn.Conv3d(in_ch, out_ch, kernel_size=(self.kernel_size, 1, 1), stride=(self.kernel_size, 1, 1), padding=0)  # conv in z-direction
+
+        self.dcn_conv = nn.Conv3d(in_ch, out_ch, kernel_size=3, stride=1, padding=1)
         self.gn = nn.GroupNorm(out_ch // 4, out_ch)
         self.relu = nn.ReLU(inplace=True)
 
@@ -55,51 +48,74 @@ class DCN_Conv(nn.Module):
         offset = torch.tanh(offset) # Output: [N, 3*K, D, W, H]; tanh is (-1, 1)
         input_shape = f.shape # shape: [N, C, D, W, H];
 
-        extend1 = self.extend_conv(f)
-        extend1 = self.exbn(extend1)
-        extend1 = self.sigmoid(extend1)
-        #extend1 = extend1.mul(0.5)
-
-        #extend2 = self.extend_conv(f)
-        #extend2 = self.exbn(extend2)
-        #extend2 = self.sigmoid(extend2)
-        #extend2 = extend2.add(1)
-
-        #feature = self.feature_conv(f)
-        #feature = self.featurebn(feature)
-        #feature = self.relu(feature)
-
-        if self.morph == 0:
-            feature = self.feature_conv_x(f)
-            feature = self.featurebn(feature)
-            feature = self.relu(feature)
-        elif self.morph == 1:
-            feature = self.feature_conv_y(f)
-            feature = self.featurebn(feature)
-            feature = self.relu(feature)
-        else:
-            feature = self.feature_conv_z(f)
-            feature = self.featurebn(feature)
-            feature = self.relu(feature)
-        
         dcn = DCN(input_shape, self.kernel_size, self.extend_scope, self.morph, self.device)
-        deformed_feature = dcn.deform_conv(feature, offset, self.if_offset, extend1, extend1) # _coordinate_map_3D (Output: [N, D, W, H*K] OR [N, D, W*K, H] OR [N, D*K, W, H]) + _bilinear_interpolate_3D (Output: [N, C, D, W, H*K] etc.)
+        deformed_feature = dcn.deform_conv(f, offset, self.if_offset) # _coordinate_map_3D (Output: [N, D, W, H*K] OR [N, D, W*K, H] OR [N, D*K, W, H]) + _bilinear_interpolate_3D (Output: [N, C, D, W, H*K] etc.)
 
+        weights = self.weights_conv(f)
+        weights = self.weightsbn(weights)
+        weights = self.relu(weights)
+        weights = torch.softmax(weights, dim=1)
+        
         # Only ever does one of the following
-        if self.morph == 0:
-            x = self.dcn_conv_x(deformed_feature)
+        if self.morph == 0: # deformed_feature.shape: [N, C, D, W, H*K]
+            deformed_feature = deformed_feature.reshape(input_shape[0], input_shape[1], input_shape[2], input_shape[3], input_shape[4], self.kernel_size)
+            deformed_feature = deformed_feature.permute(5, 0, 1, 2, 3, 4)
+            weights = weights.permute(1, 0, 2, 3, 4).unsqueeze(2) # shape [K, N, C, D, W, H]
+            weights_new = weights.detach().clone() # cannot modify in place (gradients issue)
+
+            center = int(self.kernel_size // 2)
+            for index in range(1, center + 1):
+                    weight_pos = weights[center + index, :, :, :, :, index:]  # shape [1, N, D, W, H-index]
+                    weight_pos_padded = torch.nn.functional.pad(weight_pos, (0, index, 0, 0, 0, 0))  # pad H dim at end
+                    weights_new[center + index] = weight_pos_padded
+                    weight_neg = weights[center - index, :, :, :, :, :input_shape[4]-index]  # shape [N, D, W, H-index]
+                    weight_neg_padded = torch.nn.functional.pad(weight_neg, (index, 0, 0, 0, 0, 0))  # pad H dim at start
+                    weights_new[center - index] = weight_neg_padded
+
+            x = (deformed_feature * weights).sum(dim=0)  # [N, C, D, W, H]
+            x = self.dcn_conv(x)
             x = self.gn(x)
             x = self.relu(x)
             return x
-        elif self.morph == 1:
-            x = self.dcn_conv_y(deformed_feature)
+        elif self.morph == 1: # deformed_feature.shape: [N, C, D, W*K, H]
+            deformed_feature = deformed_feature.reshape(input_shape[0], input_shape[1], input_shape[2], input_shape[3], self.kernel_size, input_shape[4])
+            deformed_feature = deformed_feature.permute(4, 0, 1, 2, 3, 5)
+            weights = weights.permute(1, 0, 2, 3, 4).unsqueeze(2)
+            weights_new = weights.detach().clone()
+
+            center = int(self.kernel_size // 2)
+            for index in range(1, center + 1):
+                    weight_pos = weights[center + index, :, :, :, index:, :]  # shape [N, D, W-index, H]
+                    weight_pos_padded = torch.nn.functional.pad(weight_pos, (0, 0, 0, index, 0, 0))  # pad W dim at end
+                    weights_new[center + index] = weight_pos_padded
+                    weight_neg = weights[center - index, :, :, :, :input_shape[3]-index, :]  # shape [N, D, W-index, H]
+                    weight_neg_padded = torch.nn.functional.pad(weight_neg, (0, 0, index, 0, 0, 0))  # pad W dim at start
+                    weights_new[center - index] = weight_neg_padded
+
+            x = (deformed_feature * weights).sum(dim=0)  # [N, C, D, W, H]
+            x = self.dcn_conv(x)
             x = self.gn(x)
             x = self.relu(x)
             return x
-        else:
-            x = self.dcn_conv_z(deformed_feature)
+        else: # deformed_feature.shape: [N, C, D*K, W, H]
+            deformed_feature = deformed_feature.reshape(input_shape[0], input_shape[1], input_shape[2], self.kernel_size, input_shape[3], input_shape[4])
+            deformed_feature = deformed_feature.permute(3, 0, 1, 2, 4, 5)
+            weights = weights.permute(1, 0, 2, 3, 4).unsqueeze(2)
+            weights_new = weights.detach().clone()
+
+            center = int(self.kernel_size // 2)
+            for index in range(1, center + 1):
+                    weight_pos = weights[center + index, :, :, index:, :, :]  # shape [N, D-index, W, H]
+                    weight_pos_padded = torch.nn.functional.pad(weight_pos, (0, 0, 0, 0, 0, index))  # pad D dim at end
+                    weights_new[center + index] = weight_pos_padded
+                    weight_neg = weights[center - index, :, :, :input_shape[2]-index, :, :]  # shape [N, D-index, W, H]
+                    weight_neg_padded = torch.nn.functional.pad(weight_neg, (0, 0, 0, 0, index, 0))  # pad D dim at start
+                    weights_new[center - index] = weight_neg_padded
+
+            x = (deformed_feature * weights).sum(dim=0)  # [N, C, D, W, H]
+            x = self.dcn_conv(x)
             x = self.gn(x)
-            x = self.relu(x)  
+            x = self.relu(x)
             return x
 
 class DCN(object):
@@ -120,7 +136,7 @@ class DCN(object):
     output: [N,1,K,K*W,H]   coordinate map
     output: [N,1,D,W,K*H]   coordinate map
     '''
-    def _coordinate_map_3D(self, offset, if_offset, extend1, extend2):
+    def _coordinate_map_3D(self, offset, if_offset):
         # offset
         #offset1, offset2 = torch.split(offset, 3 * self.num_points, dim=1) # Split offset into groups of 3*self.num_points i.e. [N, 3*K, D, W, H]
         z_offset1, y_offset1, x_offset1 = torch.split(offset, self.num_points, dim=1) # Split offset1 into groups of self.num_points i.e. [N, K, D, W, H]
@@ -200,7 +216,6 @@ class DCN(object):
                 y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4).to(self.device) # [N, K, D, W, H]
                 z_new = z_new.add(z_offset1_new.mul(self.extend_scope)) # multiply new offsets by self.extend_scope, then add z_offset1_new to z_new (which is all zeros except for depth)
                 y_new = y_new.add(y_offset1_new.mul(self.extend_scope)) # multiply new offsets by self.extend_scope, then add y_offset1_new to y_new (which is all zeros except for width)
-                x_new = x_new.add(extend1)
 
                 z_new = z_new.reshape([self.num_batch, 1, 1, self.num_points, self.depth, self.width, self.height]) # [N, 1, 1, K, D, W, H]
                 z_new = z_new.permute(0, 4, 1, 5, 2, 6, 3) # [N, D, 1, W, 1, H, K]
@@ -267,7 +282,6 @@ class DCN(object):
                 z_offset1_new = z_offset1_new.permute(1, 0, 2, 3, 4).to(self.device)
                 z_new = z_new.add(z_offset1_new.mul(self.extend_scope))
                 x_new = x_new.add(x_offset1_new.mul(self.extend_scope))
-                y_new = y_new.add(extend1)
             z_new = z_new.reshape([self.num_batch, 1, self.num_points, 1, self.depth, self.width, self.height])
             z_new = z_new.permute(0, 4, 1, 5, 2, 6, 3)
             z_new = z_new.reshape([self.num_batch, self.depth, self.num_points * self.width, self.height])
@@ -331,7 +345,6 @@ class DCN(object):
                 y_offset1_new = y_offset1_new.permute(1, 0, 2, 3, 4).to(self.device)
                 x_new = x_new.add(x_offset1_new.mul(self.extend_scope))
                 y_new = y_new.add(y_offset1_new.mul(self.extend_scope))
-                z_new = z_new.add(extend1)
 
             z_new = z_new.reshape([self.num_batch, self.num_points, 1, 1, self.depth, self.width, self.height])
             z_new = z_new.permute(0, 4, 1, 5, 2, 6, 3)
@@ -388,11 +401,11 @@ class DCN(object):
         base = torch.arange(self.num_batch) * dimension # [N] why multiply by dimension?
         base = base.reshape([-1, 1]).float()  # [N,1]
 
-        repeat = torch.ones([self.num_points * self.depth * self.width * self.height]).unsqueeze(0) # unsqueeze returns a new tensor with a dimension of 1 inserted in the indicated location; [1, N*D*W*H]
-        repeat = repeat.float()  # [1, N*D*W*H]
+        repeat = torch.ones([self.num_points * self.depth * self.width * self.height]).unsqueeze(0) # unsqueeze returns a new tensor with a dimension of 1 inserted in the indicated location; [1, K*D*W*H]
+        repeat = repeat.float()  # [1, K*D*W*H]
 
-        base = torch.matmul(base, repeat)  # [N, 1] * [1, N*D*W*H]  ==> [N, N*D*W*H]
-        base = base.reshape([-1])  # [N*N*D*W*H] what is this doing?
+        base = torch.matmul(base, repeat)  # [N, 1] * [1, K*D*W*H]  ==> [N, K*D*W*H]
+        base = base.reshape([-1])  # [N*K*D*W*H] what is this doing?
 
         base = base.to(self.device) # what is the point of this? torch.arange and torch.repeat are done on CPU by default. Have to move to same device as the other tensors.
 
@@ -468,7 +481,7 @@ class DCN(object):
             outputs = outputs.permute(0, 4, 1, 2, 3)
         return outputs
 
-    def deform_conv(self, input, offset, if_offset, extend1, extend2):
-        z, y, x = self._coordinate_map_3D(offset, if_offset, extend1, extend2)
+    def deform_conv(self, input, offset, if_offset):
+        z, y, x = self._coordinate_map_3D(offset, if_offset)
         deformed_feature = self._bilinear_interpolate_3D(input, z, y, x)
         return deformed_feature

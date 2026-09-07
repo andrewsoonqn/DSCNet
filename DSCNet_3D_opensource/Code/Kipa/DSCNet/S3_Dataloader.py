@@ -8,10 +8,11 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-def read_file_from_txt(txt_path):
+def read_file_from_txt(txt_path, sample_count):
     files = []
     for line in open(txt_path, "r"):
-        files.append(line.strip())
+        for i in range(sample_count):
+            files.append(line.strip())
     return files
 
 
@@ -43,8 +44,8 @@ def reshape_img(image, z, y, x):
 class Dataloader(data.Dataset):
     def __init__(self, args):
         super(Dataloader, self).__init__()
-        self.image_file = read_file_from_txt(args.Image_Tr_txt)
-        self.label_file = read_file_from_txt(args.Label_Tr_txt)
+        self.image_file = read_file_from_txt(args.Image_Tr_txt, args.sample_count)
+        self.label_file = read_file_from_txt(args.Label_Tr_txt, args.sample_count)
         self.shape = args.ROI_shape
         self.args = args
 
@@ -106,7 +107,7 @@ class Dataloader(data.Dataset):
         label_trans = np.where(label_trans == 4, 0, label_trans)
         #label_trans = to_categorical(label_trans[0], 3)
         label_trans = to_categorical(label_trans[0], 2)
-
+        
         return image_trans, label_trans
 
     def __len__(self):
