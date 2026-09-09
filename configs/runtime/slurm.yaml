@@ -19,10 +19,11 @@ mlflow:
 slurm:
   host: xlogin1
   max_concurrent_runs: 1
+  python_path: /home/a/andrewsq/dev/urop/dscnet/DSCNetEnv/bin/python
   partition: gpu-long
   gpu_type: a100-40
   gpus: 1
   memory_gb: 32
   cpus: 8
   time_hours: 48
-  account: null
+  account: allusers

@@ -1,0 +1,416 @@
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from omegaconf import OmegaConf
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+
+from expctl import (
+    CommandResult,
+    ExpctlError,
+    ExperimentController,
+    _execution_dirty_paths,
+)
+
+sys.path.insert(
+    0, str(REPO_ROOT / "DSCNet_3D_opensource" / "Code" / "Kipa" / "DSCNet")
+)
+from S4_Experiment_Run import _control_evidence
+
+EXPERIMENT = REPO_ROOT / "configs" / "experiment" / "dscnet_standard.yaml"
+OVERRIDES = [
+    "action=prepare",
+    "runtime.formal=false",
+    "runtime.allow_dirty=true",
+    "runtime.slurm.account=test-account",
+]
+
+
+class FakeTransport:
+    def __init__(self):
+        self.calls = []
+        self.archive_digest = None
+        self.synced_digests = {}
+        self.submit_count = 0
+        self.fail_submit = False
+        self.remote_files = {}
+
+    def ssh(self, host, argv):
+        self.calls.append(("ssh", host, tuple(argv)))
+        if argv[0] == "sha256sum":
+            name = Path(argv[1]).name
+            digest = self.synced_digests.get(name, self.archive_digest)
+            return CommandResult(0, f"{digest}  {argv[1]}\n")
+        if argv[0] == "stat":
+            return CommandResult(
+                0, str(len(self.remote_files["control/artifacts.json"])) + "\n"
+            )
+        if "verify-data" in argv:
+            return CommandResult(0, json.dumps({"status": "verified"}))
+        if "submit" in argv:
+            self.submit_count += 1
+            if self.fail_submit:
+                return CommandResult(
+                    1, stderr='{"error":"submission rejected: invalid account"}'
+                )
+            return CommandResult(0, json.dumps({"job_id": "12345"}))
+        if "verify-artifacts" in argv:
+            manifest = json.loads(self.remote_files["control/artifacts.json"])
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "status": "verified",
+                        "total_size": sum(
+                            item["size"] for item in manifest["artifacts"]
+                        ),
+                    }
+                ),
+            )
+        if "status" in argv:
+            return CommandResult(
+                0, json.dumps({"job_id": "12345", "source": "sacct", "state": "COMPLETED"})
+            )
+        if "logs" in argv:
+            return CommandResult(0, json.dumps({"run_id": "run", "logs": {}}))
+        if "cancel" in argv:
+            return CommandResult(0, json.dumps({"job_id": "12345", "status": "cancellation_requested"}))
+        return CommandResult(0)
+
+    def sync_to(self, paths, host, remote_dir):
+        self.calls.append(("sync", host, remote_dir, tuple(path.name for path in paths)))
+        for path in paths:
+            if path.is_file():
+                self.synced_digests[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        archive = next((path for path in paths if path.name == "source.tar.gz"), None)
+        if archive:
+            self.archive_digest = self.synced_digests[archive.name]
+        return CommandResult(0)
+
+    def fetch_file(self, host, remote_path, local_path, max_size):
+        self.calls.append(("fetch_file", host, remote_path, max_size))
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(self.remote_files["control/artifacts.json"])
+        return CommandResult(0)
+
+    def fetch_files(self, host, remote_root, relative_paths, destination):
+        self.calls.append(("fetch_files", host, remote_root, tuple(relative_paths)))
+        for relative in relative_paths:
+            path = destination / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(self.remote_files[relative])
+        return CommandResult(0)
+
+
+class ExpctlControllerTests(unittest.TestCase):
+    def setUp(self):
+        account_patch = patch(
+            "expctl.TRUSTED_ACCOUNTS", frozenset({"test-account"})
+        )
+        account_patch.start()
+        self.addCleanup(account_patch.stop)
+
+    def _controller(self, root, transport=None):
+        return ExperimentController(root, transport or FakeTransport())
+
+    def test_formal_dirty_check_ignores_only_non_execution_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.name", "Test"], check=True
+            )
+            (root / "tools").mkdir()
+            (root / "docs").mkdir()
+            (root / "tools" / "run.py").write_text("value = 1\n")
+            (root / "docs" / "note.md").write_text("note\n")
+            (root / ".gitignore").write_text("cache/\n")
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "commit", "-qm", "initial"], check=True
+            )
+            (root / "docs" / "note.md").write_text("changed note\n")
+            (root / ".gitignore").write_text("cache/\nartifacts/\n")
+            self.assertEqual(_execution_dirty_paths(root), [])
+            (root / "tools" / "run.py").write_text("value = 2\n")
+            self.assertEqual(_execution_dirty_paths(root), ["tools/run.py"])
+
+    def test_verify_is_non_persistent_and_rejects_non_allowlisted_host(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._controller(Path(directory))
+            verified = controller.verify(EXPERIMENT, OVERRIDES)
+            self.assertEqual(verified["state"], "verified")
+            self.assertFalse((Path(directory) / "runs").exists())
+            with self.assertRaisesRegex(ExpctlError, "host is not allowlisted"):
+                controller.verify(
+                    EXPERIMENT,
+                    [*OVERRIDES, "runtime.slurm.host=other-host"],
+                )
+
+    def test_staged_digest_matches_the_runtime_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            controller = self._controller(root)
+            record = controller._stage(EXPERIMENT, OVERRIDES)
+            control = root / "runs" / record["run_id"] / "control"
+            resolved = OmegaConf.load(control / "resolved-config.yaml")
+            with patch.dict(
+                "os.environ",
+                {
+                    "DSCNET_CONTROL_DIR": str(control),
+                    "DSCNET_EXPERIMENT_DIGEST": record["experiment_digest"],
+                },
+                clear=False,
+            ):
+                _, _, _, digest = _control_evidence(resolved)
+        self.assertEqual(digest, record["experiment_digest"])
+
+    def test_resource_and_path_allowlists_fail_closed(self):
+        cases = {
+            "Slurm account": [*OVERRIDES, "runtime.slurm.account=untrusted"],
+            "memory": [*OVERRIDES, "runtime.slurm.memory_gb=33"],
+            "GPU": [*OVERRIDES, "runtime.slurm.gpus=2"],
+            "partition": [*OVERRIDES, "runtime.slurm.partition=other"],
+            "remote experiment root": [
+                *OVERRIDES,
+                "runtime.remote_experiment_root=/tmp/experiments",
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._controller(Path(directory))
+            for message, overrides in cases.items():
+                with self.subTest(message=message), self.assertRaisesRegex(
+                    ExpctlError, message
+                ):
+                    controller.verify(EXPERIMENT, overrides)
+
+    def test_submit_is_idempotent_and_uses_verified_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            controller = self._controller(Path(directory), transport)
+            first = controller.submit(EXPERIMENT, OVERRIDES)
+            second = controller.submit(EXPERIMENT, OVERRIDES)
+
+        self.assertEqual(first["job_id"], "12345")
+        self.assertEqual(second["job_id"], first["job_id"])
+        self.assertEqual(transport.submit_count, 1)
+        commands = [call[2] for call in transport.calls if call[0] == "ssh"]
+        self.assertTrue(any(command[0] == "sha256sum" for command in commands))
+        self.assertTrue(any("verify-source" in command for command in commands))
+        self.assertTrue(any("verify-data" in command for command in commands))
+
+    def test_explicit_retry_creates_a_separate_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            controller = self._controller(Path(directory), transport)
+            first = controller.submit(EXPERIMENT, OVERRIDES)
+            retried = controller.submit(EXPERIMENT, OVERRIDES, retry=True)
+
+        self.assertEqual(retried["run_id"], first["run_id"] + "-a2")
+        self.assertEqual(retried["attempt"], 2)
+        self.assertEqual(transport.submit_count, 2)
+
+    def test_ambiguous_submit_recovers_the_same_remote_receipt(self):
+        class AmbiguousTransport(FakeTransport):
+            def ssh(self, host, argv):
+                if "submit" in argv and self.submit_count == 0:
+                    self.calls.append(("ssh", host, tuple(argv)))
+                    self.submit_count += 1
+                    return CommandResult(255, stderr="connection closed")
+                return super().ssh(host, argv)
+
+        with tempfile.TemporaryDirectory() as directory:
+            transport = AmbiguousTransport()
+            controller = self._controller(Path(directory), transport)
+            with self.assertRaisesRegex(ExpctlError, "connection closed"):
+                controller.submit(EXPERIMENT, OVERRIDES)
+            recovered = controller.submit(EXPERIMENT, OVERRIDES)
+        self.assertEqual(recovered["job_id"], "12345")
+        self.assertEqual(transport.submit_count, 2)
+        self.assertEqual(
+            sum(call[0] == "sync" for call in transport.calls),
+            1,
+            "ambiguous recovery must not mutate remote control evidence",
+        )
+
+    def test_normalization_bytes_change_experiment_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mean_std = root / "Mean_Std.npy"
+            mean_std.write_bytes(b"first")
+            overrides = [
+                *OVERRIDES,
+                "action=train",
+                f"data.Meanstd_path={mean_std}",
+            ]
+            controller = self._controller(root / "state", FakeTransport())
+            first = controller.submit(EXPERIMENT, overrides)
+            mean_std.write_bytes(b"second")
+            second = controller.submit(EXPERIMENT, overrides)
+        self.assertNotEqual(first["run_id"], second["run_id"])
+        self.assertNotEqual(
+            first["normalization"]["sha256"], second["normalization"]["sha256"]
+        )
+
+    def test_evaluation_stages_and_binds_an_explicit_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            weights = root / "weights"
+            weights.mkdir()
+            checkpoint = weights / "evaluation-best.ckpt"
+            checkpoint.write_bytes(b"checkpoint")
+            mean_std = root / "Mean_Std.npy"
+            mean_std.write_bytes(b"normalization")
+            overrides = [
+                *OVERRIDES,
+                "action=evaluate",
+                f"data.Meanstd_path={mean_std}",
+                f"data.Dir_Weights={weights}",
+                "data.model_name_max=evaluation-best.ckpt",
+            ]
+            transport = FakeTransport()
+            controller = self._controller(root / "state", transport)
+            record = controller.submit(EXPERIMENT, overrides)
+            staged = root / "state" / "runs" / record["run_id"] / "control" / "evaluation-checkpoint"
+            staged_bytes = staged.read_bytes()
+        self.assertEqual(staged_bytes, b"checkpoint")
+        self.assertEqual(
+            record["evaluation_checkpoint"]["sha256"],
+            hashlib.sha256(b"checkpoint").hexdigest(),
+        )
+        commands = [call[2] for call in transport.calls if call[0] == "ssh"]
+        self.assertTrue(any(command[0] == "cp" for command in commands))
+
+    def test_remote_digest_mismatch_fails_before_submission(self):
+        class MismatchTransport(FakeTransport):
+            def sync_to(self, paths, host, remote_dir):
+                super().sync_to(paths, host, remote_dir)
+                self.archive_digest = "0" * 64
+                self.synced_digests["source.tar.gz"] = "0" * 64
+                return CommandResult(0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            transport = MismatchTransport()
+            controller = self._controller(Path(directory), transport)
+            with self.assertRaisesRegex(ExpctlError, "digest does not match"):
+                controller.submit(EXPERIMENT, OVERRIDES)
+        self.assertEqual(transport.submit_count, 0)
+
+    def test_submission_failure_is_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            transport.fail_submit = True
+            root = Path(directory)
+            controller = self._controller(root, transport)
+            with self.assertRaisesRegex(ExpctlError, "invalid account"):
+                controller.submit(EXPERIMENT, OVERRIDES)
+            with self.assertRaisesRegex(ExpctlError, "use --retry"):
+                controller.submit(EXPERIMENT, OVERRIDES)
+            records = list((root / "runs").glob("*/control/run-manifest.json"))
+            record = json.loads(records[0].read_text())
+        self.assertEqual(record["state"], "submission_rejected")
+        self.assertIsNone(record["job_id"])
+
+    def test_status_logs_and_cancel_use_only_recorded_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            controller = self._controller(Path(directory), transport)
+            record = controller.submit(EXPERIMENT, OVERRIDES)
+            self.assertEqual(controller.status(record["run_id"])["state"], "COMPLETED")
+            self.assertEqual(controller.logs(record["run_id"])["logs"], {})
+            self.assertEqual(
+                controller.cancel(record["run_id"])["status"], "cancellation_requested"
+            )
+            with self.assertRaisesRegex(ExpctlError, "unknown run ID"):
+                controller.cancel("0" * 16)
+
+    def test_fetch_accepts_declared_artifacts_and_verifies_checksums(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            controller = self._controller(Path(directory), transport)
+            record = controller.submit(EXPERIMENT, OVERRIDES)
+            payloads = {
+                "control/resolved-config.yaml": b"action: prepare\n",
+                "control/dataset-manifest.json": b"{}\n",
+                "control/source-manifest.json": b"{}\n",
+                "control/run-manifest.json": b"{}\n",
+                "logs/pipeline.log": b"complete\n",
+                "outputs/final-metrics.json": b"{}\n",
+            }
+            artifact_manifest = {
+                "schema_version": 1,
+                "artifacts": [
+                    {
+                        "path": path,
+                        "sha256": hashlib.sha256(value).hexdigest(),
+                        "size": len(value),
+                    }
+                    for path, value in payloads.items()
+                ],
+            }
+            transport.remote_files = {
+                **payloads,
+                "control/artifacts.json": json.dumps(artifact_manifest).encode(),
+            }
+            fetched = controller.fetch(record["run_id"])
+        self.assertEqual(set(fetched["artifacts"]), set(payloads))
+
+    def test_fetch_rejects_oversized_declared_artifact_before_transfer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            controller = self._controller(Path(directory), transport)
+            record = controller.submit(EXPERIMENT, OVERRIDES)
+            artifacts = [
+                {"path": path, "sha256": "0" * 64, "size": 1}
+                for path in (
+                    "control/resolved-config.yaml",
+                    "control/dataset-manifest.json",
+                    "control/source-manifest.json",
+                    "control/run-manifest.json",
+                )
+            ]
+            artifacts.append(
+                {
+                    "path": "outputs/final-metrics.json",
+                    "sha256": "0" * 64,
+                    "size": 9 * 1024**3,
+                }
+            )
+            transport.remote_files = {
+                "control/artifacts.json": json.dumps({"artifacts": artifacts}).encode()
+            }
+            with self.assertRaisesRegex(ExpctlError, "per-file size limit"):
+                controller.fetch(record["run_id"])
+        self.assertFalse(any(call[0] == "fetch_files" for call in transport.calls))
+
+    def test_fetch_rejects_undeclared_remote_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            controller = self._controller(Path(directory), transport)
+            record = controller.submit(EXPERIMENT, OVERRIDES)
+            transport.remote_files = {
+                "control/artifacts.json": json.dumps(
+                    {
+                        "artifacts": [
+                            {"path": "../../secret", "sha256": "0" * 64, "size": 1}
+                        ]
+                    }
+                ).encode()
+            }
+            with self.assertRaisesRegex(ExpctlError, "undeclared path"):
+                controller.fetch(record["run_id"])
+
+
+if __name__ == "__main__":
+    unittest.main()

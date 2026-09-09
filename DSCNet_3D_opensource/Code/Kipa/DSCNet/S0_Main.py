@@ -67,7 +67,10 @@ def resolve_paths(args):
 
     if args.Meanstd_name is None:
         args.Meanstd_name = f"{args.run_label}_Meanstd.npy"
-    args.Meanstd_path = str(root / args.Meanstd_name)
+    meanstd_path = getattr(args, "Meanstd_path", None)
+    args.Meanstd_path = str(
+        Path(meanstd_path) if meanstd_path else root / args.Meanstd_name
+    )
 
     if args.save_path is None:
         args.save_path = str(root / "Results" / args.run_label / "DSCNet")

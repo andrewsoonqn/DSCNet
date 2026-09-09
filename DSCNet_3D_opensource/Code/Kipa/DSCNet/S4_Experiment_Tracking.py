@@ -273,6 +273,7 @@ class RunRecorder:
         parent_run_id: str | None = None,
         extra_tags: Mapping[str, str] | None = None,
         formal: bool = False,
+        git_provenance: Mapping[str, Any] | None = None,
     ):
         self.tracking_uri = tracking_uri
         self.experiment_name = experiment_name
@@ -286,7 +287,9 @@ class RunRecorder:
         self.extra_tags = dict(extra_tags or {})
         self.formal = formal
         self.run_id: str | None = None
-        self.git_provenance: dict[str, Any] | None = None
+        self.git_provenance: dict[str, Any] | None = (
+            dict(git_provenance) if git_provenance is not None else None
+        )
         self.environment: dict[str, Any] | None = None
         self.client: mlflow.MlflowClient | None = None
 
@@ -316,7 +319,8 @@ class RunRecorder:
             database.parent.mkdir(parents=True, exist_ok=True)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         self.client = mlflow.MlflowClient(tracking_uri=self.tracking_uri)
-        self.git_provenance = collect_git_provenance(self.repo_root)
+        if self.git_provenance is None:
+            self.git_provenance = collect_git_provenance(self.repo_root)
         if self.formal and self.git_provenance["dirty"]:
             raise RuntimeError("formal MLflow runs require a clean Git tree")
         self.environment = collect_environment()

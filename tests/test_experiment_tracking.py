@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -28,10 +29,40 @@ from S4_Experiment_Tracking import (
     collect_git_provenance,
     experiment_digest,
 )
-from S4_Experiment_Run import _identity_config_yaml, run_configured_experiment
+from S4_Experiment_Run import (
+    _control_evidence,
+    _identity_config_yaml,
+    run_configured_experiment,
+)
 
 
 class ExperimentTrackingTests(unittest.TestCase):
+    def test_runtime_verifies_the_checkpoint_file_evaluation_consumes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            control = root / "control"
+            weights = root / "weights"
+            control.mkdir()
+            weights.mkdir()
+            checkpoint = weights / "best.pth"
+            checkpoint.write_bytes(b"expected")
+            evidence = {
+                "name": checkpoint.name,
+                "size": checkpoint.stat().st_size,
+                "sha256": hashlib.sha256(b"expected").hexdigest(),
+            }
+            (control / "dataset-manifest.json").write_text("{}")
+            (control / "git.json").write_text("{}")
+            (control / "source-manifest.json").write_text("{}")
+            (control / "environment-lock.json").write_text("{}")
+            (control / "run-manifest.json").write_text(
+                json.dumps({"run_id": "abc", "evaluation_checkpoint": evidence})
+            )
+            checkpoint.write_bytes(b"tampered")
+            with patch.dict("os.environ", {"DSCNET_CONTROL_DIR": str(control)}):
+                with self.assertRaisesRegex(RuntimeError, "evaluation_checkpoint bytes"):
+                    _control_evidence({"data": {"Dir_Weights": str(weights)}})
+
     def _dataset(self, root):
         for split in ("train", "val", "test"):
             image_dir = root / split / "image"

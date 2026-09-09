@@ -42,6 +42,7 @@ class DataConfig:
     Va_Label_dir: str | None = None
     Te_Label_dir: str | None = None
     Meanstd_name: str | None = None
+    Meanstd_path: str | None = None
     Dir_Txt: str | None = None
     Dir_Log: str | None = None
     Dir_Save: str | None = None
@@ -108,6 +109,7 @@ class MlflowConfig:
 class SlurmConfig:
     host: str = "xlogin1"
     max_concurrent_runs: int = 1
+    python_path: str = "/home/a/andrewsq/dev/urop/dscnet/DSCNetEnv/bin/python"
     partition: str = "gpu-long"
     gpu_type: str = "a100-40"
     gpus: int = 1
