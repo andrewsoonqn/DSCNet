@@ -13,9 +13,14 @@ from torchinfo import summary
 from monai.data.utils import dense_patch_slices
 from monai.losses import DiceCELoss, DiceLoss
 
-from S3_Checkpoint import load_model_checkpoint, save_model_checkpoint
+from S3_Checkpoint import (
+    load_model_checkpoint,
+    load_training_checkpoint,
+    save_training_checkpoint,
+)
 from S3_DSCNet_Optimized import DSCNet
 from S3_Dataloader import Dataloader
+from S3_Evaluation_Metrics import log_summary, summarize_predictions
 from S3_Loss import cross_loss, dice_cross_loss, entropy_regularization_cross_loss, entropy_loss
 from S3_Metrics import cldice_score, dice_score, to_minivess_binary_mask
 
@@ -37,8 +42,38 @@ def _load_checkpoint(net, args, name):
     print(path)
 
 
-def _save_checkpoint(net, args, name):
-    save_model_checkpoint(net, _checkpoint_path(args, name), PIPELINE_NAME)
+def _save_training_checkpoint(net, args, name, optimizer, scheduler, epoch, best_score):
+    save_training_checkpoint(
+        net,
+        _checkpoint_path(args, name),
+        PIPELINE_NAME,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        scaler=None,
+        epoch=epoch,
+        best_score=best_score,
+        config_digest=args.config_digest,
+        loop_state={},
+    )
+
+
+def _resume_training(net, args, optimizer, scheduler):
+    state = load_training_checkpoint(
+        net,
+        _checkpoint_path(args, args.model_name),
+        PIPELINE_NAME,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        scaler=None,
+        expected_config_digest=args.config_digest,
+    )
+    return state["epoch"] + 1, state["best_score"]
+
+
+def _log_metric(args, name, value, step):
+    tracker = getattr(args, "tracker", None)
+    if tracker is not None:
+        tracker.log_metric(name, value, step=step)
 
 
 def _load_evaluation_checkpoint(net, args):
@@ -146,11 +181,9 @@ def Close_logger(logger):
 # Train process
 def Train_net(net, args, device, map_kernel_tensor):
     dice_mean, dice_save = 0, 0
+    validation_metrics = None
+    start_epoch = args.start_train_epoch
 
-    if not args.if_retrain and os.path.exists(
-        _checkpoint_path(args, args.model_name)
-    ):
-        _load_checkpoint(net, args, args.model_name)
     if torch.cuda.is_available():
         net = net.cuda()
 
@@ -179,6 +212,8 @@ def Train_net(net, args, device, map_kernel_tensor):
     # )
     # criterion = dice_cross_loss(lambda_dice=0.2, lambda_ce=1.0)
     criterion = entropy_regularization_cross_loss(beta_start=args.beta, beta_end=args.min_beta, decay_power=args.beta_decay_power, total_steps=args.n_epochs)
+    if not args.if_retrain:
+        start_epoch, dice_save = _resume_training(net, args, optimizer, scheduler)
 
     dt = datetime.today()
     log_name = (
@@ -196,20 +231,40 @@ def Train_net(net, args, device, map_kernel_tensor):
     logger.info("start training!")
 
     # Main train process
-    for epoch in range(args.start_train_epoch, args.n_epochs + 1):
+    for epoch in range(start_epoch, args.n_epochs + 1):
         loss = train_epoch(
             net, train_dataloader, optimizer, criterion, epoch, args.n_epochs, logger, args
         )
-        _save_checkpoint(net, args, args.model_name)
+        _log_metric(args, "train.loss", loss, epoch)
+        _log_metric(
+            args, "training.learning_rate", optimizer.param_groups[0]["lr"], epoch
+        )
         scheduler.step()
+        is_best = False
 
-        if epoch >= args.start_verify_epoch  and (epoch % args.verify_gap) == 0:
-            _load_checkpoint(net, args, args.model_name)
+        if epoch >= args.start_verify_epoch and (epoch % args.verify_gap) == 0:
             new_predict(net, args.Image_Va_txt, args.Meanstd_path, args.save_path, args, device, map_kernel_tensor)
-            dice_mean = np.mean(Dice(args.Label_Va_txt, args.save_path))
+            validation_metrics = summarize_predictions(
+                args.Label_Va_txt, args.save_path, load_with_upsample
+            )
+            dice_mean = validation_metrics["dice"]
+            log_summary(args, "validation", validation_metrics, step=epoch)
             if dice_mean > dice_save:
                 dice_save = dice_mean
-                _save_checkpoint(net, args, args.model_name_max)
+                is_best = True
+        _save_training_checkpoint(
+            net, args, args.model_name, optimizer, scheduler, epoch, dice_save
+        )
+        if is_best:
+            _save_training_checkpoint(
+                net,
+                args,
+                args.model_name_max,
+                optimizer,
+                scheduler,
+                epoch,
+                dice_save,
+            )
         logger.info(
             "Epoch:[{}/{}] lr={:.7f} loss={:.5f} dice_mean={:.4f} saved_dice={:.4f}".format(
                 epoch,
@@ -224,6 +279,7 @@ def Train_net(net, args, device, map_kernel_tensor):
     duration = (datetime.today()-dt).total_seconds()
     logger.info("Train Time (s): " + str(duration))
     Close_logger(logger)
+    return validation_metrics
 
 
 def read_file_from_txt(txt_path):
@@ -709,6 +765,10 @@ def Predict_Network(net, args, device, map_kernel_tensor):
     logger.info("Start Prediction!")
     new_predict(net, args.Image_Te_txt, args.Meanstd_path, args.save_path_max, args, device, map_kernel_tensor) # Added torch.no_grad()
 
+    test_metrics = summarize_predictions(
+        args.Label_Te_txt, args.save_path_max, load_with_upsample
+    )
+    log_summary(args, "test", test_metrics)
     # Calculate Metrics
     dice = Dice(args.Label_Te_txt, args.save_path_max)
     dice_mean = np.mean(dice)
@@ -744,6 +804,7 @@ def Predict_Network(net, args, device, map_kernel_tensor):
     duration = (datetime.today()-dt).total_seconds()
     logger.info("Test Time (s): " + str(duration))
     Close_logger(logger)
+    return test_metrics
 
 
 def _build_model(args):
@@ -793,13 +854,13 @@ def Train(args):
     net, device, map_kernel_tensor = _build_model(args)
     Create_files(args)
     _log_model_summary(net, args, device)
-    Train_net(net, args, device, map_kernel_tensor)
+    return Train_net(net, args, device, map_kernel_tensor)
 
 
 def Evaluate(args):
     net, device, map_kernel_tensor = _build_model(args)
     Create_files(args)
-    Predict_Network(net, args, device, map_kernel_tensor)
+    return Predict_Network(net, args, device, map_kernel_tensor)
 
 
 

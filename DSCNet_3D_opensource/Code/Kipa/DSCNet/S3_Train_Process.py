@@ -11,9 +11,14 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import precision_score, recall_score, accuracy_score
 # from torchinfo import summary
 
-from S3_Checkpoint import load_model_checkpoint, save_model_checkpoint
+from S3_Checkpoint import (
+    load_model_checkpoint,
+    load_training_checkpoint,
+    save_training_checkpoint,
+)
 from S3_DSCNet import DSCNet
 from S3_Dataloader import Dataloader
+from S3_Evaluation_Metrics import log_summary, summarize_predictions
 from S3_Loss import cross_loss
 from S3_Metrics import cldice_score, dice_score, to_minivess_binary_mask
 
@@ -35,8 +40,50 @@ def _load_checkpoint(net, args, name):
     print(path)
 
 
-def _save_checkpoint(net, args, name):
-    save_model_checkpoint(net, _checkpoint_path(args, name), PIPELINE_NAME)
+def _save_training_checkpoint(
+    net, args, name, optimizer, scheduler, scaler, epoch, best_score, loop_state
+):
+    save_training_checkpoint(
+        net,
+        _checkpoint_path(args, name),
+        PIPELINE_NAME,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        scaler=scaler,
+        epoch=epoch,
+        best_score=best_score,
+        config_digest=args.config_digest,
+        loop_state=loop_state,
+    )
+
+
+def _resume_training(net, args, optimizer, scheduler, scaler):
+    state = load_training_checkpoint(
+        net,
+        _checkpoint_path(args, args.model_name),
+        PIPELINE_NAME,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        scaler=scaler,
+        expected_config_digest=args.config_digest,
+    )
+    loop_state = state["loop_state"]
+    return (
+        state["epoch"] + 1,
+        state["best_score"],
+        loop_state.get("dice_max", state["best_score"]),
+        loop_state.get("early_stopping_counter", 0),
+    )
+
+
+def _log_metric(args, name, value, step):
+    tracker = getattr(args, "tracker", None)
+    if tracker is not None:
+        tracker.log_metric(name, value, step=step)
+
+
+def _early_stopping_reached(args, counter):
+    return args.use_earlystop and counter >= args.earlystop_patience
 
 
 def _load_evaluation_checkpoint(net, args):
@@ -153,11 +200,10 @@ def Close_logger(logger):
 # Train process
 def Train_net(net, args):
     dice_mean, dice_save, dice_max = 0, 0, 0
+    validation_metrics = None
+    counter = 0
+    start_epoch = args.start_train_epoch
 
-    if not args.if_retrain and os.path.exists(
-        _checkpoint_path(args, args.model_name)
-    ):
-        _load_checkpoint(net, args, args.model_name)
     if torch.cuda.is_available():
         net = net.cuda()
 
@@ -184,6 +230,10 @@ def Train_net(net, args):
     )
 
     criterion = cross_loss()
+    if not args.if_retrain:
+        start_epoch, dice_save, dice_max, counter = _resume_training(
+            net, args, optimizer, scheduler, scaler=None
+        )
 
     dt = datetime.today()
     log_name = (
@@ -201,26 +251,35 @@ def Train_net(net, args):
     logger.info("start training!")
 
     # Early stopping mechanism
-    counter = 0
     min_delta = args.earlystop_threshold
     patience = args.earlystop_patience
+    if _early_stopping_reached(args, counter):
+        logger.info("checkpoint already reached the early-stopping condition")
+        Close_logger(logger)
+        return validation_metrics
 
     # Main train process
-    for epoch in range(args.start_train_epoch, args.n_epochs + 1):
+    for epoch in range(start_epoch, args.n_epochs + 1):
         loss = train_epoch(
             net, train_dataloader, optimizer, criterion, epoch, args.n_epochs
         )
-        _save_checkpoint(net, args, args.model_name)
-        # scheduler.step(loss)
+        _log_metric(args, "train.loss", loss, epoch)
+        _log_metric(
+            args, "training.learning_rate", optimizer.param_groups[0]["lr"], epoch
+        )
+        is_best = False
 
         if epoch >= args.start_verify_epoch:
-            _load_checkpoint(net, args, args.model_name)
             # The validation set is selected according to the task
             predict(net, args.Image_Va_txt, args.Meanstd_path, args.save_path, args)
-            dice_mean = np.mean(Dice(args.Label_Va_txt, args.save_path))
+            validation_metrics = summarize_predictions(
+                args.Label_Va_txt, args.save_path, load_with_upsample
+            )
+            dice_mean = validation_metrics["dice"]
+            log_summary(args, "validation", validation_metrics, step=epoch)
             if dice_mean > dice_save:
                 dice_save = dice_mean
-                _save_checkpoint(net, args, args.model_name_max)
+                is_best = True
             if dice_mean > dice_max + min_delta:
                 dice_max = dice_mean
                 counter = 0
@@ -228,6 +287,33 @@ def Train_net(net, args):
                 counter += 1
             if args.use_rlrop:
                 scheduler.step(dice_mean)  # for ReduceLROnPlateau
+        loop_state = {
+            "dice_max": dice_max,
+            "early_stopping_counter": counter,
+        }
+        _save_training_checkpoint(
+            net,
+            args,
+            args.model_name,
+            optimizer,
+            scheduler,
+            None,
+            epoch,
+            dice_save,
+            loop_state,
+        )
+        if is_best:
+            _save_training_checkpoint(
+                net,
+                args,
+                args.model_name_max,
+                optimizer,
+                scheduler,
+                None,
+                epoch,
+                dice_save,
+                loop_state,
+            )
         logger.info(
             "Epoch:[{}/{}]  lr={:.6f}  loss={:.5f}  counter={} dice_mean={:.4f} "
             "max_dice={:.4f} saved_dice={:.4f}".format(
@@ -241,21 +327,21 @@ def Train_net(net, args):
                 dice_save,
             )
         )
-        if args.use_earlystop and counter >= patience:
+        if _early_stopping_reached(args, counter):
             logger.info("Early stopping triggered!")
             break
     logger.info("finish training!")
     Close_logger(logger)
+    return validation_metrics
 
 
 # Train process with AMP
 def Train_net_amp(net, args):
     dice_mean, dice_save, dice_max = 0, 0, 0
+    validation_metrics = None
+    counter = 0
+    start_epoch = args.start_train_epoch
 
-    if not args.if_retrain and os.path.exists(
-        _checkpoint_path(args, args.model_name)
-    ):
-        _load_checkpoint(net, args, args.model_name)
     if torch.cuda.is_available():
         net = net.cuda()
 
@@ -282,6 +368,10 @@ def Train_net_amp(net, args):
         )
     )
     criterion = cross_loss()
+    if not args.if_retrain:
+        start_epoch, dice_save, dice_max, counter = _resume_training(
+            net, args, optimizer, scheduler, scaler
+        )
 
     dt = datetime.today()
     log_name = (
@@ -299,34 +389,70 @@ def Train_net_amp(net, args):
     logger.info("start training!")
 
     # Early stopping mechanism
-    counter = 0
     min_delta = args.earlystop_threshold
     patience = args.earlystop_patience
+    if _early_stopping_reached(args, counter):
+        logger.info("checkpoint already reached the early-stopping condition")
+        Close_logger(logger)
+        return validation_metrics
 
     # Main train process
-    for epoch in range(args.start_train_epoch, args.n_epochs + 1):
+    for epoch in range(start_epoch, args.n_epochs + 1):
         loss = train_epoch_amp(
             net, train_dataloader, optimizer, criterion, scaler, epoch, args.n_epochs
         )
-        _save_checkpoint(net, args, args.model_name)
-        # scheduler.step(loss)
+        _log_metric(args, "train.loss", loss, epoch)
+        _log_metric(
+            args, "training.learning_rate", optimizer.param_groups[0]["lr"], epoch
+        )
+        is_best = False
 
         if epoch >= args.start_verify_epoch:
-            _load_checkpoint(net, args, args.model_name)
             # The validation set is selected according to the task
             predict_amp(
                 net, args.Image_Va_txt, args.Meanstd_path, args.save_path, args
             )
-            dice_mean = np.mean(Dice(args.Label_Va_txt, args.save_path))
+            validation_metrics = summarize_predictions(
+                args.Label_Va_txt, args.save_path, load_with_upsample
+            )
+            dice_mean = validation_metrics["dice"]
+            log_summary(args, "validation", validation_metrics, step=epoch)
             if dice_mean > dice_save:
                 dice_save = dice_mean
-                _save_checkpoint(net, args, args.model_name_max)
+                is_best = True
             if dice_mean > dice_max + min_delta:
                 dice_max = dice_mean
                 counter = 0
             else:
                 counter += 1
             scheduler.step(dice_mean)
+        loop_state = {
+            "dice_max": dice_max,
+            "early_stopping_counter": counter,
+        }
+        _save_training_checkpoint(
+            net,
+            args,
+            args.model_name,
+            optimizer,
+            scheduler,
+            scaler,
+            epoch,
+            dice_save,
+            loop_state,
+        )
+        if is_best:
+            _save_training_checkpoint(
+                net,
+                args,
+                args.model_name_max,
+                optimizer,
+                scheduler,
+                scaler,
+                epoch,
+                dice_save,
+                loop_state,
+            )
         logger.info(
             "Epoch:[{}/{}]  lr={:.6f}  loss={:.5f}  dice_mean={:.4f} "
             "max_dice={:.4f} saved_dice={:.4f}".format(
@@ -339,11 +465,12 @@ def Train_net_amp(net, args):
                 dice_save,
             )
         )
-        if args.use_earlystop and counter >= patience:
+        if _early_stopping_reached(args, counter):
             logger.info("Early stopping triggered!")
             break
     logger.info("finish training!")
     Close_logger(logger)
+    return validation_metrics
 
 
 def read_file_from_txt(txt_path):  # 从txt里读取数据
@@ -1151,6 +1278,10 @@ def Predict_Network(net, args):
         net, args.Image_Te_txt, args.Meanstd_path, args.save_path_max, args
     )  # Added torch.no_grad()
 
+    test_metrics = summarize_predictions(
+        args.Label_Te_txt, args.save_path_max, load_with_upsample
+    )
+    log_summary(args, "test", test_metrics)
     dice = Dice(args.Label_Te_txt, args.save_path_max)
     dice_mean = np.mean(dice)
     cldice = clDice(args.Label_Te_txt, args.save_path_max)
@@ -1173,6 +1304,7 @@ def Predict_Network(net, args):
     logger.info("Accuracy mean: " + str(accuracy_mean))
     logger.info("Finish!")
     Close_logger(logger)
+    return test_metrics
 
 
 # AMP implementation
@@ -1200,6 +1332,10 @@ def Predict_Network_amp(net, args):
         net, args.Image_Te_txt, args.Meanstd_path, args.save_path_max, args
     )  # Added torch.no_grad()
 
+    test_metrics = summarize_predictions(
+        args.Label_Te_txt, args.save_path_max, load_with_upsample
+    )
+    log_summary(args, "test", test_metrics)
     dice = Dice(args.Label_Te_txt, args.save_path_max)
     dice_mean = np.mean(dice)
     cldice = clDice(args.Label_Te_txt, args.save_path_max)
@@ -1222,6 +1358,7 @@ def Predict_Network_amp(net, args):
     logger.info("Accuracy mean: " + str(accuracy_mean))
     logger.info("Finish!")
     Close_logger(logger)
+    return test_metrics
 
 
 def _build_model(args):
@@ -1244,15 +1381,13 @@ def Train(args):
     net = _build_model(args)
     Create_files(args)
     if args.if_fullprecision:
-        Train_net(net, args)
-    else:
-        Train_net_amp(net, args)
+        return Train_net(net, args)
+    return Train_net_amp(net, args)
 
 
 def Evaluate(args):
     net = _build_model(args)
     Create_files(args)
     if args.if_fullprecision:
-        Predict_Network(net, args)
-    else:
-        Predict_Network_amp(net, args)
+        return Predict_Network(net, args)
+    return Predict_Network_amp(net, args)

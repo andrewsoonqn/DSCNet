@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
 import argparse
+import hashlib
+import json
 import random
 from pathlib import Path
 
@@ -180,7 +182,20 @@ def apply_reproducibility(seed, deterministic):
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 
+def _legacy_config_digest(args):
+    excluded = {"config_digest", "if_retrain", "start_train_epoch", "tracker"}
+    values = {
+        name: value
+        for name, value in vars(args).items()
+        if name not in excluded
+    }
+    canonical = json.dumps(values, default=str, sort_keys=True, separators=(",", ":"))
+    return "legacy-" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def Process(args):
+    if not hasattr(args, "config_digest"):
+        args.config_digest = _legacy_config_digest(args)
     validate_action_artifacts(args)
     apply_reproducibility(
         getattr(args, "seed", 2026), getattr(args, "deterministic", True)
@@ -218,7 +233,7 @@ def Process(args):
         import S3_Optimized_Train_Process as pipeline
     else:
         import S3_Train_Process as pipeline
-    getattr(pipeline, operation)(args)
+    return getattr(pipeline, operation)(args)
 
 
 def build_legacy_parser():

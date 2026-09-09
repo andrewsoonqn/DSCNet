@@ -1,6 +1,7 @@
 hydra-core==1.3.2
 marimo==0.19.9
 matplotlib==3.10.8
+mlflow==3.16.0
 monai==1.5.2
 nibabel==5.3.3
 numpy==2.3.5

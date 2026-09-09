@@ -98,7 +98,8 @@ class MlflowUIConfig:
 
 @dataclass
 class MlflowConfig:
-    tracking_uri: str = "file:///home/a/andrewsq/data/urop/experiments/mlflow"
+    tracking_uri: str = "sqlite:///artifacts/experiments/mlflow.db"
+    artifact_root: str = "artifacts/experiments/mlflow-artifacts"
     experiment_name: str = "dscnet"
     ui: MlflowUIConfig = field(default_factory=MlflowUIConfig)
 
@@ -106,6 +107,7 @@ class MlflowConfig:
 @dataclass
 class SlurmConfig:
     host: str = "xlogin1"
+    max_concurrent_runs: int = 1
     partition: str = "gpu-long"
     gpu_type: str = "a100-40"
     gpus: int = 1
@@ -239,6 +241,8 @@ def validate_config(config: ExperimentConfig) -> ExperimentConfig:
 
     if config.runtime.kind not in {"local", "slurm"}:
         raise ValueError("runtime.kind must be local or slurm")
+    if config.runtime.slurm.max_concurrent_runs != 1:
+        raise ValueError("the initial SQLite backend permits one concurrent run")
     if config.runtime.mlflow.ui.location not in {"login", "slurm"}:
         raise ValueError("mlflow.ui.location must be login or slurm")
     if config.runtime.formal and config.runtime.allow_dirty:
