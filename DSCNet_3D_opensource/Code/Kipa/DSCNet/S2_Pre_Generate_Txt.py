@@ -1,36 +1,60 @@
-# -*- coding: utf-8 -*-
-from os.path import exists, join
-from os import listdir
-import numpy as np
-import random
-import fileinput
-import os
+"""Generate deterministic text manifests for NIfTI datasets."""
 
-"""
-The purpose of this code is to generate ".txt" files in */TXT/ for training and testing
-"""
+import re
+from pathlib import Path
+
+
+def _natural_key(path):
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part.lower())
+        for part in re.split(r"(\d+)", path.name)
+    )
 
 
 def Get_file_list(file_dir):
-    files = os.listdir(file_dir)
-    # Sort files named with numbers (Like 1.nii.gz, 2.nii.gz)
-    files.sort(key=lambda x: int(x.split(".")[0]))
-    files_num = len(files)
-    return files, files_num
+    files = sorted(
+        (
+            path
+            for path in Path(file_dir).iterdir()
+            if path.is_file() and path.name.endswith((".nii", ".nii.gz"))
+        ),
+        key=_natural_key,
+    )
+    return files, len(files)
+
+
+def _write_manifest(files, output_path):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(str(path) for path in files))
+    print("2 Finish Generate_Txt:", output_path)
 
 
 def Generate_Txt(image_path, txt_name):
-    f = open(txt_name, "w")
-    files, files_num = Get_file_list(image_path)
-    index_count = 0
-    count = 0
-    for file in files:
-        index_count = index_count + 1
-        if count == files_num - 1:
-            f.write(image_path + str(file))
-            break
-        if index_count >= 0:
-            f.write(image_path + str(file) + "\n")
-            count = count + 1
-    f.close()
-    print("2 Finish Generate_Txt: ", txt_name)
+    files, _ = Get_file_list(image_path)
+    _write_manifest(files, txt_name)
+
+
+def Generate_Paired_Txt(image_path, label_path, image_txt, label_txt):
+    """Write aligned image-label manifests or fail before training starts."""
+    images, _ = Get_file_list(image_path)
+    labels, _ = Get_file_list(label_path)
+    if not images or not labels:
+        raise ValueError(
+            f"image-label split is empty: {image_path}, {label_path}"
+        )
+
+    image_names = {path.name for path in images}
+    label_names = {path.name for path in labels}
+    if image_names != label_names:
+        missing_labels = sorted(image_names - label_names)
+        missing_images = sorted(label_names - image_names)
+        raise ValueError(
+            "image-label filenames do not match; "
+            f"missing labels={missing_labels}, missing images={missing_images}"
+        )
+
+    labels_by_name = {path.name: path for path in labels}
+    paired_labels = [labels_by_name[path.name] for path in images]
+    _write_manifest(images, image_txt)
+    _write_manifest(paired_labels, label_txt)

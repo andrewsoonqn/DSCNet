@@ -44,7 +44,11 @@ Run via `tmux` to keep window open:
 
 - Check available resources: `htop` and `nvtop`
 
-- Run with allocation of resources and real time log display: `OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES=<num> python -u DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label <run_label>  2>&1 | tee logs/session_$(date +%F_%H-%M-%S).log` OR configure multiple runs in `run_model.sh` and run `bash run_models.sh`
+- Prepare one run: `python DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --action prepare --run_label <run_label>`
+
+- Train with validation checkpoint selection: `OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES=<num> python -u DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --action train --run_label <run_label> 2>&1 | tee logs/session_$(date +%F_%H-%M-%S).log`
+
+- Evaluate the frozen test set only after the protocol and checkpoint are fixed: `python DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --action evaluate --run_label <run_label>`
 
 - Split panes to view `nvtop` in parallel: `Ctrl +B` then `%`, navigate panes with `Ctrl + B` then left and right arrow keys
 
@@ -80,25 +84,21 @@ For creation of environment on server (only required for the first time):
 
 - `virtualenv DSCNetEnv`
 
-For activating environment:
-
-- `DSCNetEnv\Scripts\activate`
-
-For activating environment on server:
+For activating the environment on macOS, Linux, or the server:
 
 - `source DSCNetEnv/bin/activate`
 
-For installing requirements (`requirements0.txt` for Jon's laptop, `requirements1.txt` for Jon's desktop, `requirements2.txt` for Jon's server configuration, try the above or create your own `requirements.txt` file):
+For activating it on Windows:
 
-- `pip install -r requirements<X>.txt`
+- `DSCNetEnv\Scripts\activate`
 
-For installing new packages:
+For installing requirements:
 
-- `pip install <pakage_name>`
+- `python -m pip install -r requirements.txt`
 
-For updating `requirements<X>.txt`:
+For installing a new package:
 
-- `pip freeze > requirements<X>.txt`
+- `python -m pip install <package_name>`
 
 For deactivating environment:
 
@@ -106,14 +106,11 @@ For deactivating environment:
 
 ##### Other local commands:
 
-For training 2D version:
+For preparing and training the 3D model:
 
-- `python DSCNet_2D_opensource/Code/DRIVE/DSCNet/S0_Main.py`
+- `bash run_models.sh prepare unet4`
+- `bash run_models.sh train unet4`
 
-For training 3D version:
+For evaluating a trained 3D model:
 
-- `set OMP_NUM_THREADS=8 && set CUDA_VISIBLE_DEVICES=0 && python -u DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label <run_label>`
-
-For predicting 3D version with trained model:
-
-- `python DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label --Dir_Weights <path/to/weights/dir> --model_name_max --if_onlytest True`
+- `bash run_models.sh evaluate unet4 --Dir_Weights <path/to/weights/dir> --model_name_max <checkpoint_name>`

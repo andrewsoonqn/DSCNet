@@ -36,13 +36,21 @@ class DecoderConv(nn.Module):
 
 
 class DSCBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, extend_scope, if_offset, device, conv_cls):
+    def __init__(
+        self, in_ch, out_ch, kernel_size, extend_scope, if_offset, device, conv_cls
+    ):
         super(DSCBlock, self).__init__()
 
         self.conv0 = conv_cls(in_ch, out_ch)
-        self.convx = DCN_Conv(in_ch, out_ch, 3, extend_scope, 0, if_offset, device)
-        self.convy = DCN_Conv(in_ch, out_ch, 3, extend_scope, 1, if_offset, device)
-        self.convz = DCN_Conv(in_ch, out_ch, 3, extend_scope, 2, if_offset, device)
+        self.convx = DCN_Conv(
+            in_ch, out_ch, kernel_size, extend_scope, 0, if_offset, device
+        )
+        self.convy = DCN_Conv(
+            in_ch, out_ch, kernel_size, extend_scope, 1, if_offset, device
+        )
+        self.convz = DCN_Conv(
+            in_ch, out_ch, kernel_size, extend_scope, 2, if_offset, device
+        )
         self.merge = conv_cls(4 * out_ch, out_ch)
 
     def forward(self, x):
@@ -75,9 +83,11 @@ class DSCNet(nn.Module):
         super(DSCNet, self).__init__()
         if unet_layers not in (3, 4, 5):
             raise ValueError("unet_layers must be one of 3, 4, or 5")
+        if kernel_size < 3 or kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be an odd integer of at least 3")
 
         self.device = device
-        self.kernel_size = kernel_size  # kernel_size not in use
+        self.kernel_size = kernel_size
         self.extend_scope = extend_scope
         self.if_offset = if_offset
         self.relu = nn.ReLU(inplace=True)
@@ -94,6 +104,7 @@ class DSCNet(nn.Module):
                 DSCBlock(
                     in_ch,
                     out_ch,
+                    self.kernel_size,
                     self.extend_scope,
                     self.if_offset,
                     self.device,
@@ -109,6 +120,7 @@ class DSCNet(nn.Module):
                 DSCBlock(
                     current_ch + skip_ch,
                     skip_ch,
+                    self.kernel_size,
                     self.extend_scope,
                     self.if_offset,
                     self.device,

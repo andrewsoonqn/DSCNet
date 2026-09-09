@@ -59,8 +59,10 @@ class ScheduledDropout(nn.Module):
 class DSCNet(nn.Module):
     def __init__(self, n_channels, n_classes, kernel_size, extend_scope, if_offset, device, number, dim, epochs):
         super(DSCNet, self).__init__()
+        if kernel_size < 3 or kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be an odd integer of at least 3")
         self.device = device
-        self.kernel_size = kernel_size # kernel_size not in use
+        self.kernel_size = kernel_size
         self.extend_scope = extend_scope
         self.if_offset = if_offset
         self.relu = nn.ReLU(inplace=True)
@@ -70,45 +72,45 @@ class DSCNet(nn.Module):
 
         # Unet
         self.conv00 = EncoderConv(n_channels, self.number)
-        self.conv0x = DCN_Conv(n_channels, self.number, 3, self.extend_scope, 0, self.if_offset, self.device)
-        self.conv0y = DCN_Conv(n_channels, self.number, 3, self.extend_scope, 1, self.if_offset, self.device)
-        self.conv0z = DCN_Conv(n_channels, self.number, 3, self.extend_scope, 2, self.if_offset, self.device)
+        self.conv0x = DCN_Conv(n_channels, self.number, self.kernel_size, self.extend_scope, 0, self.if_offset, self.device)
+        self.conv0y = DCN_Conv(n_channels, self.number, self.kernel_size, self.extend_scope, 1, self.if_offset, self.device)
+        self.conv0z = DCN_Conv(n_channels, self.number, self.kernel_size, self.extend_scope, 2, self.if_offset, self.device)
         self.conv1 = EncoderConv(4*self.number, self.number)
 
         self.conv20 = EncoderConv(self.number, 2*self.number)
-        self.conv2x = DCN_Conv(self.number, 2*self.number, 3, self.extend_scope, 0, self.if_offset, self.device)
-        self.conv2y = DCN_Conv(self.number, 2*self.number, 3, self.extend_scope, 1, self.if_offset, self.device)
-        self.conv2z = DCN_Conv(self.number, 2*self.number, 3, self.extend_scope, 2, self.if_offset, self.device)
+        self.conv2x = DCN_Conv(self.number, 2*self.number, self.kernel_size, self.extend_scope, 0, self.if_offset, self.device)
+        self.conv2y = DCN_Conv(self.number, 2*self.number, self.kernel_size, self.extend_scope, 1, self.if_offset, self.device)
+        self.conv2z = DCN_Conv(self.number, 2*self.number, self.kernel_size, self.extend_scope, 2, self.if_offset, self.device)
         self.conv3 = EncoderConv(8*self.number, 2*self.number)
 
         self.conv40 = EncoderConv(2*self.number, 4*self.number)
-        self.conv4x = DCN_Conv(2*self.number, 4*self.number, 3, self.extend_scope, 0, self.if_offset, self.device)
-        self.conv4y = DCN_Conv(2*self.number, 4*self.number, 3, self.extend_scope, 1, self.if_offset, self.device)
-        self.conv4z = DCN_Conv(2*self.number, 4*self.number, 3, self.extend_scope, 2, self.if_offset, self.device)
+        self.conv4x = DCN_Conv(2*self.number, 4*self.number, self.kernel_size, self.extend_scope, 0, self.if_offset, self.device)
+        self.conv4y = DCN_Conv(2*self.number, 4*self.number, self.kernel_size, self.extend_scope, 1, self.if_offset, self.device)
+        self.conv4z = DCN_Conv(2*self.number, 4*self.number, self.kernel_size, self.extend_scope, 2, self.if_offset, self.device)
         self.conv5 = EncoderConv(16*self.number, 4*self.number)
 
         self.conv60 = EncoderConv(4*self.number, 8*self.number)
-        self.conv6x = DCN_Conv(4*self.number, 8*self.number, 3, self.extend_scope, 0, self.if_offset, self.device)
-        self.conv6y = DCN_Conv(4*self.number, 8*self.number, 3, self.extend_scope, 1, self.if_offset, self.device)
-        self.conv6z = DCN_Conv(4*self.number, 8*self.number, 3, self.extend_scope, 2, self.if_offset, self.device)
+        self.conv6x = DCN_Conv(4*self.number, 8*self.number, self.kernel_size, self.extend_scope, 0, self.if_offset, self.device)
+        self.conv6y = DCN_Conv(4*self.number, 8*self.number, self.kernel_size, self.extend_scope, 1, self.if_offset, self.device)
+        self.conv6z = DCN_Conv(4*self.number, 8*self.number, self.kernel_size, self.extend_scope, 2, self.if_offset, self.device)
         self.conv7 = EncoderConv(32*self.number, 8*self.number)
 
         self.conv120 = EncoderConv(12*self.number, 4*self.number)
-        self.conv12x = DCN_Conv(12*self.number, 4*self.number, 3, self.extend_scope, 0, self.if_offset, self.device)
-        self.conv12y = DCN_Conv(12*self.number, 4*self.number, 3, self.extend_scope, 1, self.if_offset, self.device)
-        self.conv12z = DCN_Conv(12*self.number, 4*self.number, 3, self.extend_scope, 2, self.if_offset, self.device)
+        self.conv12x = DCN_Conv(12*self.number, 4*self.number, self.kernel_size, self.extend_scope, 0, self.if_offset, self.device)
+        self.conv12y = DCN_Conv(12*self.number, 4*self.number, self.kernel_size, self.extend_scope, 1, self.if_offset, self.device)
+        self.conv12z = DCN_Conv(12*self.number, 4*self.number, self.kernel_size, self.extend_scope, 2, self.if_offset, self.device)
         self.conv13 = EncoderConv(16*self.number, 4*self.number)
 
         self.conv140 = DecoderConv(6*self.number, 2*self.number)
-        self.conv14x = DCN_Conv(6*self.number, 2*self.number, 3, self.extend_scope, 0, self.if_offset, self.device)
-        self.conv14y = DCN_Conv(6*self.number, 2*self.number, 3, self.extend_scope, 1, self.if_offset, self.device)
-        self.conv14z = DCN_Conv(6*self.number, 2*self.number, 3, self.extend_scope, 2, self.if_offset, self.device)
+        self.conv14x = DCN_Conv(6*self.number, 2*self.number, self.kernel_size, self.extend_scope, 0, self.if_offset, self.device)
+        self.conv14y = DCN_Conv(6*self.number, 2*self.number, self.kernel_size, self.extend_scope, 1, self.if_offset, self.device)
+        self.conv14z = DCN_Conv(6*self.number, 2*self.number, self.kernel_size, self.extend_scope, 2, self.if_offset, self.device)
         self.conv15 = DecoderConv(8*self.number, 2*self.number)
 
         self.conv160 = DecoderConv(3*self.number, self.number)
-        self.conv16x = DCN_Conv(3*self.number, self.number, 3, self.extend_scope, 0, self.if_offset, self.device)
-        self.conv16y = DCN_Conv(3*self.number, self.number, 3, self.extend_scope, 1, self.if_offset, self.device)
-        self.conv16z = DCN_Conv(3*self.number, self.number, 3, self.extend_scope, 2, self.if_offset, self.device)
+        self.conv16x = DCN_Conv(3*self.number, self.number, self.kernel_size, self.extend_scope, 0, self.if_offset, self.device)
+        self.conv16y = DCN_Conv(3*self.number, self.number, self.kernel_size, self.extend_scope, 1, self.if_offset, self.device)
+        self.conv16z = DCN_Conv(3*self.number, self.number, self.kernel_size, self.extend_scope, 2, self.if_offset, self.device)
         self.conv17 = DecoderConv(4*self.number, self.number)
 
         self.out_conv = nn.Conv3d(self.number, n_classes, 1)

@@ -8,19 +8,43 @@ import SimpleITK as sitk
 from datetime import datetime
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from skimage.morphology import skeletonize, ball, disk, dilation
 from sklearn.metrics import precision_score, recall_score, accuracy_score
 from torchinfo import summary
 from monai.data.utils import dense_patch_slices
 from monai.losses import DiceCELoss, DiceLoss
 
+from S3_Checkpoint import load_model_checkpoint, save_model_checkpoint
 from S3_DSCNet_Optimized import DSCNet
 from S3_Dataloader import Dataloader
 from S3_Loss import cross_loss, dice_cross_loss, entropy_regularization_cross_loss, entropy_loss
+from S3_Metrics import cldice_score, dice_score, to_minivess_binary_mask
 
 import warnings
 
 warnings.filterwarnings("ignore")
+
+
+PIPELINE_NAME = "optimized"
+
+
+def _checkpoint_path(args, name):
+    return os.path.join(args.Dir_Weights, name)
+
+
+def _load_checkpoint(net, args, name):
+    path = _checkpoint_path(args, name)
+    load_model_checkpoint(net, path, PIPELINE_NAME)
+    print(path)
+
+
+def _save_checkpoint(net, args, name):
+    save_model_checkpoint(net, _checkpoint_path(args, name), PIPELINE_NAME)
+
+
+def _load_evaluation_checkpoint(net, args):
+    best_path = _checkpoint_path(args, args.model_name_max)
+    name = args.model_name_max if os.path.isfile(best_path) else args.model_name
+    _load_checkpoint(net, args, name)
 
 
 # Use <AverageMeter> to calculate the mean in the process
@@ -121,14 +145,12 @@ def Close_logger(logger):
 
 # Train process
 def Train_net(net, args, device, map_kernel_tensor):
-    dice_mean, dice_save, dice_v, dice_a = 0, 0, 0, 0
+    dice_mean, dice_save = 0, 0
 
-    # Determine if trained parameters exist
     if not args.if_retrain and os.path.exists(
-        os.path.join(args.Dir_Weights, args.model_name)
+        _checkpoint_path(args, args.model_name)
     ):
-        net.load_state_dict(torch.load(os.path.join(args.Dir_Weights, args.model_name)))
-        print(os.path.join(args.Dir_Weights, args.model_name))
+        _load_checkpoint(net, args, args.model_name)
     if torch.cuda.is_available():
         net = net.cuda()
 
@@ -178,23 +200,16 @@ def Train_net(net, args, device, map_kernel_tensor):
         loss = train_epoch(
             net, train_dataloader, optimizer, criterion, epoch, args.n_epochs, logger, args
         )
-        torch.save(net.state_dict(), os.path.join(args.Dir_Weights, args.model_name))
+        _save_checkpoint(net, args, args.model_name)
         scheduler.step()
 
         if epoch >= args.start_verify_epoch  and (epoch % args.verify_gap) == 0:
-            net.load_state_dict(
-                torch.load(os.path.join(args.Dir_Weights, args.model_name))
-            )
-            new_predict(net, args.Image_Va_txt, args.Va_Meanstd_name, args.save_path, args, device, map_kernel_tensor)
-            dice_v, dice_a = Dice(args.Label_Va_txt, args.save_path)
-            dice_v = np.mean(dice_v)
-            dice_mean = dice_v
+            _load_checkpoint(net, args, args.model_name)
+            new_predict(net, args.Image_Va_txt, args.Meanstd_path, args.save_path, args, device, map_kernel_tensor)
+            dice_mean = np.mean(Dice(args.Label_Va_txt, args.save_path))
             if dice_mean > dice_save:
                 dice_save = dice_mean
-                torch.save(
-                    net.state_dict(),
-                    os.path.join(args.Dir_Weights, args.model_name_max),
-                )
+                _save_checkpoint(net, args, args.model_name_max)
         logger.info(
             "Epoch:[{}/{}] lr={:.7f} loss={:.5f} dice_mean={:.4f} saved_dice={:.4f}".format(
                 epoch,
@@ -238,7 +253,7 @@ def generate_map_kernel(ROI_shape):
 
 
 # new predict process
-def new_predict(model, image_dir, meanstd_filename, save_path, args, device, map_kernel_tensor):
+def new_predict(model, image_dir, meanstd_path, save_path, args, device, map_kernel_tensor):
     print("Predict test data")
     model.eval()
  
@@ -261,7 +276,7 @@ def new_predict(model, image_dir, meanstd_filename, save_path, args, device, map
  
         # Normalise
         name = image_path[image_path.rfind("/") + 1:]
-        mean, std = np.load(args.root_dir + meanstd_filename)
+        mean, std = np.load(meanstd_path)
         image = (image - mean) / std
  
         # Pad if any dimension is smaller than ROI
@@ -575,52 +590,30 @@ def load_with_upsample(pred_nifti_path, ref_nifti_path):
     return upsampled_arr, groundtruth_arr
 
 def Dice(label_dir, pred_dir):
-    file = read_file_from_txt(label_dir)
-    file_num = len(file)
-    i = 0
-    dice_vein = np.zeros(shape=(file_num), dtype=np.float32)
-    dice_artery = np.zeros(shape=(file_num), dtype=np.float32)
+    files = read_file_from_txt(label_dir)
+    scores = np.zeros(len(files), dtype=np.float32)
 
     print("Dice:")
-    for t in range(file_num):
-        image_path = file[t]
-        name = image_path[image_path.rfind('/') + 1:]
-        predict = sitk.ReadImage(join(pred_dir, name))
-        groundtruth = sitk.ReadImage(image_path)
+    for index, image_path in enumerate(files):
+        name = os.path.basename(image_path)
+        prediction_image = sitk.ReadImage(join(pred_dir, name))
+        target_image = sitk.ReadImage(image_path)
 
-        if predict.GetSize() == groundtruth.GetSize():
-            predict = sitk.GetArrayFromImage(predict)
-            groundtruth = sitk.GetArrayFromImage(groundtruth)
+        if prediction_image.GetSize() == target_image.GetSize():
+            prediction = sitk.GetArrayFromImage(prediction_image)
+            target = sitk.GetArrayFromImage(target_image)
         else:
-            predict, groundtruth = load_with_upsample(join(pred_dir, name), image_path)
+            prediction, target = load_with_upsample(
+                join(pred_dir, name), image_path
+            )
 
-        groundtruth = np.where(groundtruth == 2, 0, groundtruth)
-        groundtruth = np.where(groundtruth == 3, 2, groundtruth)
-        groundtruth = np.where(groundtruth == 4, 0, groundtruth)
+        scores[index] = dice_score(prediction, target)
+        print(name, scores[index])
 
-        predict_vein = np.where(predict == 1, 1, 0).flatten()
-        predict_artery = np.where(predict == 2, 1, 0).flatten()
-        groundtruth_vein = np.where(groundtruth == 1, 1, 0).flatten()
-        groundtruth_artery = np.where(groundtruth == 2, 1, 0).flatten()
-
-        tmp = predict_vein + groundtruth_vein
-        a = np.sum(np.where(tmp == 2, 1, 0))
-        b = np.sum(predict_vein)
-        c = np.sum(groundtruth_vein)
-        dice_vein[i] = (2 * a) / (b + c)
-
-        tmp = predict_artery + groundtruth_artery
-        a = np.sum(np.where(tmp == 2, 1, 0))
-        b = np.sum(predict_artery)
-        c = np.sum(groundtruth_artery)
-        dice_artery[i] = (2 * a) / (b + c)
-        print(name, dice_vein[i], dice_artery[i])
-        i += 1
-
-    return dice_vein, dice_artery
+    return scores
 
 
-def clDice(label_dir, pred_dir, radius=1):
+def clDice(label_dir, pred_dir):
     file = read_file_from_txt(label_dir)
     file_num = len(file)
     i = 0
@@ -639,25 +632,7 @@ def clDice(label_dir, pred_dir, radius=1):
         else:
             predict, groundtruth = load_with_upsample(join(pred_dir, name), image_path)
 
-        predict = predict.astype(bool)
-        groundtruth = groundtruth.astype(bool)
-        skel_pred = skeletonize(predict)
-        skel_gt   = skeletonize(groundtruth)
-
-        if skel_pred.sum() == 0 or skel_gt.sum() == 0:
-            cl_Dice[i] = 0.0
-            print(name, cl_Dice[i])
-            i += 1
-            continue
-
-        #selem = ball(radius) if predict.ndim == 3 else disk(radius)
-        #pred_dil = dilation(predict, selem)
-        #gt_dil   = dilation(groundtruth, selem)
-
-        tprec = np.logical_and(skel_pred, groundtruth).sum()  / skel_pred.sum()
-        tsens = np.logical_and(skel_gt, predict).sum() / skel_gt.sum()
-
-        cl_Dice[i] = 2 * tprec * tsens / (tprec + tsens)
+        cl_Dice[i] = cldice_score(predict, groundtruth)
 
         print(name, cl_Dice[i])
         i += 1
@@ -686,8 +661,12 @@ def precision_recall_accuracy_score(label_dir, pred_dir):
         else:
             predict, groundtruth = load_with_upsample(join(pred_dir, name), image_path)
 
-        predict_flat = predict.flatten()
-        groundtruth_flat = groundtruth.flatten()
+        predict_flat = to_minivess_binary_mask(
+            predict, name=f"prediction {name}"
+        ).flatten()
+        groundtruth_flat = to_minivess_binary_mask(
+            groundtruth, name=f"target {name}"
+        ).flatten()
 
         p = precision_score(groundtruth_flat, predict_flat, average="binary")
         r = recall_score(groundtruth_flat, predict_flat, average="binary")
@@ -711,17 +690,7 @@ def Create_files(args):
 def Predict_Network(net, args, device, map_kernel_tensor):
     if torch.cuda.is_available():
         net = net.cuda()
-    try:
-        net.load_state_dict(
-            torch.load(os.path.join(args.Dir_Weights, args.model_name_max))
-        )
-        print(os.path.join(args.Dir_Weights, args.model_name_max))
-    except:
-        print(
-            "Warning 100: No parameters in weights_max, here use parameters in weights"
-        )
-        net.load_state_dict(torch.load(os.path.join(args.Dir_Weights, args.model_name)))
-        print(os.path.join(args.Dir_Weights, args.model_name))
+    _load_evaluation_checkpoint(net, args)
 
     dt = datetime.today()
     log_name = (
@@ -738,12 +707,12 @@ def Predict_Network(net, args, device, map_kernel_tensor):
     logger = Get_logger(args.Dir_Log + log_name)
 
     logger.info("Start Prediction!")
-    new_predict(net, args.Image_Te_txt, args.Te_Meanstd_name, args.save_path_max, args, device, map_kernel_tensor) # Added torch.no_grad()
+    new_predict(net, args.Image_Te_txt, args.Meanstd_path, args.save_path_max, args, device, map_kernel_tensor) # Added torch.no_grad()
 
     # Calculate Metrics
     dice = Dice(args.Label_Te_txt, args.save_path_max)
-    dice_mean = np.mean(dice[0])
-    dice_std = np.std(dice[0])
+    dice_mean = np.mean(dice)
+    dice_std = np.std(dice)
     cldice = clDice(args.Label_Te_txt, args.save_path_max)
     cldice_mean = np.mean(cldice)
     cldice_std = np.std(cldice)
@@ -756,7 +725,7 @@ def Predict_Network(net, args, device, map_kernel_tensor):
     accuracy_std = np.std(accuracy)
 
     # Log Metrics
-    logger.info("Dice: " + np.array2string(dice[0], separator=","))
+    logger.info("Dice: " + np.array2string(dice, separator=","))
     logger.info("Dice mean: " + str(dice_mean))
     logger.info("Dice std: " + str(dice_std))
     logger.info("clDice: " + np.array2string(cldice, separator=","))
@@ -777,12 +746,9 @@ def Predict_Network(net, args, device, map_kernel_tensor):
     Close_logger(logger)
 
 
-def Train(args):
-    #os.environ["CUDA_VISIBLE_DEVICES"] = args.GPU_id 
-    #removed above, replace with use of `export CUDA_VISIBLE_DEVICES=<num>` and `export OMP_NUM_THREADS=<num>` before running S0_Main.py
+def _build_model(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("CUDA available:", torch.cuda.is_available())
-    
     net = DSCNet(
         n_channels=args.n_channels,
         n_classes=args.n_classes,
@@ -792,11 +758,19 @@ def Train(args):
         device=device,
         number=args.n_basic_layer,
         dim=args.dim,
-        epochs=args.n_epochs
+        epochs=args.n_epochs,
     )
-    Create_files(args)
+    map_kernel = generate_map_kernel(args.ROI_shape)
+    map_kernel_tensor = torch.from_numpy(map_kernel).to(device)
+    return net, device, map_kernel_tensor
 
-    model_stats = summary(net, input_size=(args.batch_size, args.n_channels, args.ROI_shape[0], args.ROI_shape[1], args.ROI_shape[2]), device=device)
+
+def _log_model_summary(net, args, device):
+    model_stats = summary(
+        net,
+        input_size=(args.batch_size, args.n_channels, *args.ROI_shape),
+        device=device,
+    )
     dt = datetime.today()
     log_name = (
         str(dt.date())
@@ -811,18 +785,21 @@ def Train(args):
     )
     logger = Get_logger_model(args.Dir_Log + log_name + "_model")
     for line in str(model_stats).splitlines():
-         logger.info(line)
+        logger.info(line)
     Close_logger(logger)
 
-    # map_kernel for repeated use during prediction (generate once based on ROI_shape)
-    map_kernel = generate_map_kernel(args.ROI_shape)
-    map_kernel_tensor = torch.from_numpy(map_kernel).to(device)
 
-    if not args.if_onlytest:
-        Train_net(net, args, device, map_kernel_tensor)
-        Predict_Network(net, args, device, map_kernel_tensor)
-    else:
-        Predict_Network(net, args, device, map_kernel_tensor)
+def Train(args):
+    net, device, map_kernel_tensor = _build_model(args)
+    Create_files(args)
+    _log_model_summary(net, args, device)
+    Train_net(net, args, device, map_kernel_tensor)
+
+
+def Evaluate(args):
+    net, device, map_kernel_tensor = _build_model(args)
+    Create_files(args)
+    Predict_Network(net, args, device, map_kernel_tensor)
 
 
 

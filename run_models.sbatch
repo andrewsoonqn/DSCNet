@@ -140,14 +140,20 @@ echo ""
 ###############################################################################
 
 # Change these for quick experiments.
+: "${ACTION:?Submit with ACTION=prepare, ACTION=train, or ACTION=evaluate}"
+case "${ACTION}" in
+    prepare|train|evaluate) ;;
+    *) echo "Invalid ACTION: ${ACTION}" >&2; exit 2 ;;
+esac
 UNET_LAYERS="${UNET_LAYERS:-4}"
 RUN_LABEL="${RUN_LABEL:-Test_Run_unet${UNET_LAYERS}}"
 
-CMD="python ${PROJECT_DIR}/DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --run_label ${RUN_LABEL} --unet_layers ${UNET_LAYERS}"
+CMD="python ${PROJECT_DIR}/DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --action ${ACTION} --run_label ${RUN_LABEL} --unet_layers ${UNET_LAYERS}"
 
 echo "========================================================================"
 echo "  Executing pipeline"
 echo "========================================================================"
+echo "  Action      : ${ACTION}"
 echo "  U-Net layers: ${UNET_LAYERS}"
 echo "  Run label   : ${RUN_LABEL}"
 echo "  Command: ${CMD}"

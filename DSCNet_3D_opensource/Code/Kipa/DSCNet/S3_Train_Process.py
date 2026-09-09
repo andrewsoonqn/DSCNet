@@ -8,17 +8,41 @@ import SimpleITK as sitk
 from datetime import datetime
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from skimage.morphology import skeletonize, ball, dilation
 from sklearn.metrics import precision_score, recall_score, accuracy_score
 # from torchinfo import summary
 
+from S3_Checkpoint import load_model_checkpoint, save_model_checkpoint
 from S3_DSCNet import DSCNet
 from S3_Dataloader import Dataloader
 from S3_Loss import cross_loss
+from S3_Metrics import cldice_score, dice_score, to_minivess_binary_mask
 
 import warnings
 
 warnings.filterwarnings("ignore")
+
+
+PIPELINE_NAME = "standard"
+
+
+def _checkpoint_path(args, name):
+    return os.path.join(args.Dir_Weights, name)
+
+
+def _load_checkpoint(net, args, name):
+    path = _checkpoint_path(args, name)
+    load_model_checkpoint(net, path, PIPELINE_NAME)
+    print(path)
+
+
+def _save_checkpoint(net, args, name):
+    save_model_checkpoint(net, _checkpoint_path(args, name), PIPELINE_NAME)
+
+
+def _load_evaluation_checkpoint(net, args):
+    best_path = _checkpoint_path(args, args.model_name_max)
+    name = args.model_name_max if os.path.isfile(best_path) else args.model_name
+    _load_checkpoint(net, args, name)
 
 
 # Use <AverageMeter> to calculate the mean in the process
@@ -128,14 +152,12 @@ def Close_logger(logger):
 
 # Train process
 def Train_net(net, args):
-    dice_mean, dice_save, dice_max, dice_v, dice_a = 0, 0, 0, 0, 0
+    dice_mean, dice_save, dice_max = 0, 0, 0
 
-    # Determine if trained parameters exist
     if not args.if_retrain and os.path.exists(
-        os.path.join(args.Dir_Weights, args.model_name)
+        _checkpoint_path(args, args.model_name)
     ):
-        net.load_state_dict(torch.load(os.path.join(args.Dir_Weights, args.model_name)))
-        print(os.path.join(args.Dir_Weights, args.model_name))
+        _load_checkpoint(net, args, args.model_name)
     if torch.cuda.is_available():
         net = net.cuda()
 
@@ -188,33 +210,19 @@ def Train_net(net, args):
         loss = train_epoch(
             net, train_dataloader, optimizer, criterion, epoch, args.n_epochs
         )
-        torch.save(net.state_dict(), os.path.join(args.Dir_Weights, args.model_name))
+        _save_checkpoint(net, args, args.model_name)
         # scheduler.step(loss)
 
         if epoch >= args.start_verify_epoch:
-            net.load_state_dict(
-                torch.load(os.path.join(args.Dir_Weights, args.model_name))
-            )
+            _load_checkpoint(net, args, args.model_name)
             # The validation set is selected according to the task
-            predict(net, args.Image_Va_txt, args.Va_Meanstd_name, args.save_path, args)
-            # Calculate the Dice
-            dice_v, dice_a = Dice(args.Label_Va_txt, args.save_path)
-            dice_v = np.mean(dice_v)
-            dice_a = np.mean(dice_a)
-            # dice_mean = (dice_v + dice_a) / 2
-            dice_mean = dice_v
+            predict(net, args.Image_Va_txt, args.Meanstd_path, args.save_path, args)
+            dice_mean = np.mean(Dice(args.Label_Va_txt, args.save_path))
             if dice_mean > dice_save:
                 dice_save = dice_mean
-                torch.save(
-                    net.state_dict(),
-                    os.path.join(args.Dir_Weights, args.model_name_max),
-                )
+                _save_checkpoint(net, args, args.model_name_max)
             if dice_mean > dice_max + min_delta:
                 dice_max = dice_mean
-                # torch.save(
-                # net.state_dict(),
-                # os.path.join(args.Dir_Weights, args.model_name_max),
-                # )
                 counter = 0
             else:
                 counter += 1
@@ -242,14 +250,12 @@ def Train_net(net, args):
 
 # Train process with AMP
 def Train_net_amp(net, args):
-    dice_mean, dice_save, dice_max, dice_v, dice_a = 0, 0, 0, 0, 0
+    dice_mean, dice_save, dice_max = 0, 0, 0
 
-    # Determine if trained parameters exist
     if not args.if_retrain and os.path.exists(
-        os.path.join(args.Dir_Weights, args.model_name)
+        _checkpoint_path(args, args.model_name)
     ):
-        net.load_state_dict(torch.load(os.path.join(args.Dir_Weights, args.model_name)))
-        print(os.path.join(args.Dir_Weights, args.model_name))
+        _load_checkpoint(net, args, args.model_name)
     if torch.cuda.is_available():
         net = net.cuda()
 
@@ -302,29 +308,19 @@ def Train_net_amp(net, args):
         loss = train_epoch_amp(
             net, train_dataloader, optimizer, criterion, scaler, epoch, args.n_epochs
         )
-        torch.save(net.state_dict(), os.path.join(args.Dir_Weights, args.model_name))
+        _save_checkpoint(net, args, args.model_name)
         # scheduler.step(loss)
 
         if epoch >= args.start_verify_epoch:
-            net.load_state_dict(
-                torch.load(os.path.join(args.Dir_Weights, args.model_name))
-            )
+            _load_checkpoint(net, args, args.model_name)
             # The validation set is selected according to the task
             predict_amp(
-                net, args.Image_Va_txt, args.Va_Meanstd_name, args.save_path, args
+                net, args.Image_Va_txt, args.Meanstd_path, args.save_path, args
             )
-            # Calculate the Dice
-            dice_v, dice_a = Dice(args.Label_Va_txt, args.save_path)
-            dice_v = np.mean(dice_v)
-            dice_a = np.mean(dice_a)
-            # dice_mean = (dice_v + dice_a) / 2
-            dice_mean = dice_v
+            dice_mean = np.mean(Dice(args.Label_Va_txt, args.save_path))
             if dice_mean > dice_save:
                 dice_save = dice_mean
-                torch.save(
-                    net.state_dict(),
-                    os.path.join(args.Dir_Weights, args.model_name_max),
-                )
+                _save_checkpoint(net, args, args.model_name_max)
             if dice_mean > dice_max + min_delta:
                 dice_max = dice_mean
                 counter = 0
@@ -366,7 +362,7 @@ def reshape_img(image, z, y, x):
 
 
 # Predict process
-def predict(model, image_dir, meanstd_filename, save_path, args):
+def predict(model, image_dir, meanstd_path, save_path, args):
     print("Predict test data")
     model.eval()
     file = read_file_from_txt(image_dir)
@@ -384,7 +380,7 @@ def predict(model, image_dir, meanstd_filename, save_path, args):
         image = image.astype(np.float32)
 
         name = image_path[image_path.rfind("/") + 1 :]
-        mean, std = np.load(args.root_dir + meanstd_filename)
+        mean, std = np.load(meanstd_path)
         image = (image - mean) / std
         z, y, x = image.shape
         z_old, y_old, x_old = z, y, x
@@ -673,7 +669,7 @@ def predict(model, image_dir, meanstd_filename, save_path, args):
 
 
 # Predict process (with AMP implementation)
-def predict_amp(model, image_dir, meanstd_filename, save_path, args):
+def predict_amp(model, image_dir, meanstd_path, save_path, args):
     print("Predict test data")
     model.eval()
     file = read_file_from_txt(image_dir)
@@ -691,7 +687,7 @@ def predict_amp(model, image_dir, meanstd_filename, save_path, args):
         image = image.astype(np.float32)
 
         name = image_path[image_path.rfind("/") + 1 :]
-        mean, std = np.load(args.root_dir + meanstd_filename)
+        mean, std = np.load(meanstd_path)
         image = (image - mean) / std
         z, y, x = image.shape
         z_old, y_old, x_old = z, y, x
@@ -1034,53 +1030,30 @@ def load_with_upsample(pred_nifti_path, ref_nifti_path):
 
 
 def Dice(label_dir, pred_dir):
-    # 获取image文件索引
-    file = read_file_from_txt(label_dir)
-    file_num = len(file)
-    i = 0
-    dice_vein = np.zeros(shape=(file_num), dtype=np.float32)
-    dice_artery = np.zeros(shape=(file_num), dtype=np.float32)
+    files = read_file_from_txt(label_dir)
+    scores = np.zeros(len(files), dtype=np.float32)
 
     print("Dice:")
-    for t in range(file_num):
-        image_path = file[t]
-        name = image_path[image_path.rfind("/") + 1 :]
-        predict = sitk.ReadImage(join(pred_dir, name))
-        groundtruth = sitk.ReadImage(image_path)
+    for index, image_path in enumerate(files):
+        name = os.path.basename(image_path)
+        prediction_image = sitk.ReadImage(join(pred_dir, name))
+        target_image = sitk.ReadImage(image_path)
 
-        if predict.GetSize() == groundtruth.GetSize():
-            predict = sitk.GetArrayFromImage(predict)
-            groundtruth = sitk.GetArrayFromImage(groundtruth)
+        if prediction_image.GetSize() == target_image.GetSize():
+            prediction = sitk.GetArrayFromImage(prediction_image)
+            target = sitk.GetArrayFromImage(target_image)
         else:
-            predict, groundtruth = load_with_upsample(join(pred_dir, name), image_path)
+            prediction, target = load_with_upsample(
+                join(pred_dir, name), image_path
+            )
 
-        groundtruth = np.where(groundtruth == 2, 0, groundtruth)
-        groundtruth = np.where(groundtruth == 3, 2, groundtruth)
-        groundtruth = np.where(groundtruth == 4, 0, groundtruth)
+        scores[index] = dice_score(prediction, target)
+        print(name, scores[index])
 
-        predict_vein = np.where(predict == 1, 1, 0).flatten()
-        predict_artery = np.where(predict == 2, 1, 0).flatten()
-        groundtruth_vein = np.where(groundtruth == 1, 1, 0).flatten()
-        groundtruth_artery = np.where(groundtruth == 2, 1, 0).flatten()
-
-        tmp = predict_vein + groundtruth_vein
-        a = np.sum(np.where(tmp == 2, 1, 0))
-        b = np.sum(predict_vein)
-        c = np.sum(groundtruth_vein)
-        dice_vein[i] = (2 * a) / (b + c)
-
-        tmp = predict_artery + groundtruth_artery
-        a = np.sum(np.where(tmp == 2, 1, 0))
-        b = np.sum(predict_artery)
-        c = np.sum(groundtruth_artery)
-        dice_artery[i] = (2 * a) / (b + c)
-        print(name, dice_vein[i], dice_artery[i])
-        i += 1
-
-    return dice_vein, dice_artery
+    return scores
 
 
-def clDice(label_dir, pred_dir, radius=1):
+def clDice(label_dir, pred_dir):
     file = read_file_from_txt(label_dir)
     file_num = len(file)
     i = 0
@@ -1099,29 +1072,7 @@ def clDice(label_dir, pred_dir, radius=1):
         else:
             predict, groundtruth = load_with_upsample(join(pred_dir, name), image_path)
 
-        predict = predict.astype(bool)
-        groundtruth = groundtruth.astype(bool)
-
-        skel_predict = skeletonize(predict)
-        skel_groundtruth = skeletonize(groundtruth)
-
-        if radius > 0:
-            selem = ball(radius) if predict.ndim == 3 else None
-            predict_dil = dilation(predict, selem)
-            groundtruth_dil = dilation(groundtruth, selem)
-        else:
-            predict_dil = predict
-            groundtruth_dil = groundtruth
-
-        # intersection = np.logical_and(skel_predict, skel_groundtruth).sum()
-        # size_predict = skel_predict.sum()
-        # size_groundtruth = skel_groundtruth.sum()
-
-        # Topology-aware coverage
-        tpc = np.logical_and(skel_groundtruth, predict_dil).sum()
-        tpp = np.logical_and(skel_predict, groundtruth_dil).sum()
-
-        cl_Dice[i] = (2 * tpc) / (tpc + tpp + skel_groundtruth.sum())
+        cl_Dice[i] = cldice_score(predict, groundtruth)
 
         print(name, cl_Dice[i])
         i += 1
@@ -1150,8 +1101,12 @@ def precision_recall_accuracy_score(label_dir, pred_dir):
         else:
             predict, groundtruth = load_with_upsample(join(pred_dir, name), image_path)
 
-        predict_flat = predict.flatten()
-        groundtruth_flat = groundtruth.flatten()
+        predict_flat = to_minivess_binary_mask(
+            predict, name=f"prediction {name}"
+        ).flatten()
+        groundtruth_flat = to_minivess_binary_mask(
+            groundtruth, name=f"target {name}"
+        ).flatten()
 
         p = precision_score(groundtruth_flat, predict_flat, average="binary")
         r = recall_score(groundtruth_flat, predict_flat, average="binary")
@@ -1175,17 +1130,7 @@ def Create_files(args):
 def Predict_Network(net, args):
     if torch.cuda.is_available():
         net = net.cuda()
-    try:
-        net.load_state_dict(
-            torch.load(os.path.join(args.Dir_Weights, args.model_name_max))
-        )
-        print(os.path.join(args.Dir_Weights, args.model_name_max))
-    except:
-        print(
-            "Warning 100: No parameters in weights_max, here use parameters in weights"
-        )
-        net.load_state_dict(torch.load(os.path.join(args.Dir_Weights, args.model_name)))
-        print(os.path.join(args.Dir_Weights, args.model_name))
+    _load_evaluation_checkpoint(net, args)
 
     dt = datetime.today()
     log_name = (
@@ -1203,11 +1148,11 @@ def Predict_Network(net, args):
 
     logger.info("Start Prediction!")
     predict(
-        net, args.Image_Te_txt, args.Te_Meanstd_name, args.save_path_max, args
+        net, args.Image_Te_txt, args.Meanstd_path, args.save_path_max, args
     )  # Added torch.no_grad()
 
     dice = Dice(args.Label_Te_txt, args.save_path_max)
-    dice_mean = np.mean(dice[0])
+    dice_mean = np.mean(dice)
     cldice = clDice(args.Label_Te_txt, args.save_path_max)
     cldice_mean = np.mean(cldice)
     precision, recall, accuracy = precision_recall_accuracy_score(
@@ -1216,7 +1161,7 @@ def Predict_Network(net, args):
     precision_mean = np.mean(precision)
     recall_mean = np.mean(recall)
     accuracy_mean = np.mean(accuracy)
-    logger.info("Dice: " + np.array2string(dice[0], separator=","))
+    logger.info("Dice: " + np.array2string(dice, separator=","))
     logger.info("Dice mean: " + str(dice_mean))
     logger.info("clDice: " + np.array2string(cldice, separator=","))
     logger.info("clDice mean: " + str(cldice_mean))
@@ -1234,17 +1179,7 @@ def Predict_Network(net, args):
 def Predict_Network_amp(net, args):
     if torch.cuda.is_available():
         net = net.cuda()
-    try:
-        net.load_state_dict(
-            torch.load(os.path.join(args.Dir_Weights, args.model_name_max))
-        )
-        print(os.path.join(args.Dir_Weights, args.model_name_max))
-    except:
-        print(
-            "Warning 100: No parameters in weights_max, here use parameters in weights"
-        )
-        net.load_state_dict(torch.load(os.path.join(args.Dir_Weights, args.model_name)))
-        print(os.path.join(args.Dir_Weights, args.model_name))
+    _load_evaluation_checkpoint(net, args)
 
     dt = datetime.today()
     log_name = (
@@ -1262,11 +1197,11 @@ def Predict_Network_amp(net, args):
 
     logger.info("Start Prediction!")
     predict_amp(
-        net, args.Image_Te_txt, args.Te_Meanstd_name, args.save_path_max, args
+        net, args.Image_Te_txt, args.Meanstd_path, args.save_path_max, args
     )  # Added torch.no_grad()
 
     dice = Dice(args.Label_Te_txt, args.save_path_max)
-    dice_mean = np.mean(dice[0])
+    dice_mean = np.mean(dice)
     cldice = clDice(args.Label_Te_txt, args.save_path_max)
     cldice_mean = np.mean(cldice)
     precision, recall, accuracy = precision_recall_accuracy_score(
@@ -1275,7 +1210,7 @@ def Predict_Network_amp(net, args):
     precision_mean = np.mean(precision)
     recall_mean = np.mean(recall)
     accuracy_mean = np.mean(accuracy)
-    logger.info("Dice: " + np.array2string(dice[0], separator=","))
+    logger.info("Dice: " + np.array2string(dice, separator=","))
     logger.info("Dice mean: " + str(dice_mean))
     logger.info("clDice: " + np.array2string(cldice, separator=","))
     logger.info("clDice mean: " + str(cldice_mean))
@@ -1289,13 +1224,10 @@ def Predict_Network_amp(net, args):
     Close_logger(logger)
 
 
-def Train(args):
-    # os.environ["CUDA_VISIBLE_DEVICES"] = args.GPU_id
-    # removed above, replace with use of `export CUDA_VISIBLE_DEVICES=<num>` and `export OMP_NUM_THREADS=<num>` before running S0_Main.py
+def _build_model(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("CUDA available:", torch.cuda.is_available())
-
-    net = DSCNet(
+    return DSCNet(
         n_channels=args.n_channels,
         n_classes=args.n_classes,
         kernel_size=args.kernel_size,
@@ -1306,17 +1238,21 @@ def Train(args):
         dim=args.dim,
         unet_layers=args.unet_layers,
     )
+
+
+def Train(args):
+    net = _build_model(args)
     Create_files(args)
-    # summary(net, input_size=(1, C, H, W), device=net.device)
-    if not args.if_fullprecision:
-        if not args.if_onlytest:
-            Train_net_amp(net, args)
-            Predict_Network_amp(net, args)
-        else:
-            Predict_Network_amp(net, args)
+    if args.if_fullprecision:
+        Train_net(net, args)
     else:
-        if not args.if_onlytest:
-            Train_net(net, args)
-            Predict_Network(net, args)
-        else:
-            Predict_Network(net, args)
+        Train_net_amp(net, args)
+
+
+def Evaluate(args):
+    net = _build_model(args)
+    Create_files(args)
+    if args.if_fullprecision:
+        Predict_Network(net, args)
+    else:
+        Predict_Network_amp(net, args)

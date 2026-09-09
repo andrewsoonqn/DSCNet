@@ -1,42 +1,38 @@
-# -*- coding: utf-8 -*-
-from os import listdir
-from os.path import join
+"""Compute normalization statistics from the training images."""
+
+from pathlib import Path
+
 import numpy as np
 import SimpleITK as sitk
 
-"""
-The purpose of this code is to calculate the "mean" and "std" of the image, 
-which will be used in the subsequent normalization process
 
-Take the image ending with "nii.gz" as an example (using SimpleITK)
-"""
+def Getmeanstd(image_path, output_path):
+    image_dir = Path(image_path)
+    image_files = sorted(
+        path
+        for path in image_dir.iterdir()
+        if path.is_file() and path.name.endswith((".nii", ".nii.gz"))
+    )
+    if not image_files:
+        raise ValueError(f"No NIfTI images found in {image_dir}")
 
+    voxel_count = 0
+    voxel_sum = 0.0
+    squared_voxel_sum = 0.0
+    for image_file in image_files:
+        image = sitk.GetArrayFromImage(sitk.ReadImage(str(image_file))).astype(
+            np.float32
+        )
+        voxel_count += image.size
+        voxel_sum += np.sum(image, dtype=np.float64)
+        squared_voxel_sum += np.sum(np.square(image), dtype=np.float64)
 
-def Getmeanstd(args, image_path, meanstd_name):
-    """
-    :param args: Parameters
-    :param image_path: Address of image
-    :param meanstd_name: save name of "mean" and "std"  (using ".npy" format to save)
-    :return: None
-    """
-    root_dir = args.root_dir
-    file_names = [x for x in listdir(join(image_path))]
-    mean, std, length = 0.0, 0.0, 0.0
+    mean = voxel_sum / voxel_count
+    variance = max(squared_voxel_sum / voxel_count - mean**2, 0.0)
+    std = np.sqrt(variance)
 
-    for file_name in file_names:
-        image = sitk.ReadImage(image_path + file_name)
-        image = sitk.GetArrayFromImage(image).astype(np.float32)
-        length += image.size
-        mean += np.sum(image)
-        # print(mean, length)
-    mean = mean / length
-
-    for file_name in file_names:
-        image = sitk.ReadImage(image_path + file_name)
-        image = sitk.GetArrayFromImage(image).astype(np.float32)
-        std += np.sum(np.square((image - mean)))
-        # print(std)
-    std = np.sqrt(std / length)
-    print("1 Finish Getmeanstd: ", meanstd_name)
-    print("Mean and std are: ", mean, std)
-    np.save(root_dir + meanstd_name, [mean, std])
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(output_path, [mean, std])
+    print("1 Finish Getmeanstd:", output_path)
+    print("Mean and std are:", mean, std)

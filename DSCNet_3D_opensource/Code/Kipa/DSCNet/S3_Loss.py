@@ -50,6 +50,14 @@ class dice_cross_loss(nn.Module):
         total_loss = self.lambda_dice * dice_loss + self.lambda_ce * ce_loss
         return total_loss, self.lambda_dice*dice_loss, self.lambda_ce*ce_loss
     
+def categorical_entropy(probabilities):
+    """Return mean categorical entropy across voxels and batches."""
+    if probabilities.ndim < 2:
+        raise ValueError("probabilities must include a class dimension at axis 1")
+    probabilities = probabilities.clamp(min=1e-8)
+    return -(probabilities * probabilities.log()).sum(dim=1).mean()
+
+
 class entropy_regularization_cross_loss(nn.Module):
     
     def __init__(self, beta_start=0.1, beta_end=0.001, decay_power=0.9, total_steps=10000, smooth=1e-6):
@@ -72,8 +80,7 @@ class entropy_regularization_cross_loss(nn.Module):
         ce_loss = -torch.mean(y_true * torch.log(y_pred + self.smooth) +
                            (1 - y_true) * torch.log(1 - y_pred + self.smooth))
         
-        clamped_pred = y_pred.clamp(min=1e-8)
-        entropy = -(clamped_pred * clamped_pred.log()).sum(dim=-1).mean()
+        entropy = categorical_entropy(y_pred)
 
         return ce_loss - beta * entropy
 
@@ -95,8 +102,7 @@ class entropy_loss(nn.Module):
     
     def forward(self, y_pred, epoch):
         self.beta = self.get_beta(epoch)
-        clamped_pred = y_pred.clamp(min=1e-8)
-        return -(clamped_pred * clamped_pred.log()).sum(dim=-1).mean() 
+        return categorical_entropy(y_pred)
 
 '''
 Another Loss Function proposed by us in IEEE transactions on Image Precessing:

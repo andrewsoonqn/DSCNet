@@ -4,6 +4,7 @@ from torch.utils import data
 import numpy as np
 import SimpleITK as sitk
 from S3_Data_Augumentation import transform_img_lab
+from S3_Metrics import to_minivess_binary_mask
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -58,13 +59,14 @@ class Dataloader(data.Dataset):
         image = sitk.GetArrayFromImage(image)
         label = sitk.ReadImage(label_path)
         label = sitk.GetArrayFromImage(label)
+        label = to_minivess_binary_mask(label, name=f"label {label_path}")
 
         z, y, x = image.shape
         image = image.astype(dtype=np.float32)
         label = label.astype(dtype=np.float32)
 
         # Normalization
-        mean, std = np.load(self.args.root_dir + self.args.Tr_Meanstd_name)
+        mean, std = np.load(self.args.Meanstd_path)
         image = (image - mean) / std
 
         if self.shape[0] > z:
@@ -101,11 +103,9 @@ class Dataloader(data.Dataset):
         if isinstance(label_trans, torch.Tensor):
             label_trans = label_trans.numpy()
 
-        # Only focus on vessels ...
-        label_trans = np.where(label_trans == 2, 0, label_trans) 
-        label_trans = np.where(label_trans == 3, 2, label_trans)
-        label_trans = np.where(label_trans == 4, 0, label_trans)
-        #label_trans = to_categorical(label_trans[0], 3)
+        label_trans = to_minivess_binary_mask(
+            label_trans, name=f"augmented label {label_path}"
+        )
         label_trans = to_categorical(label_trans[0], 2)
         
         return image_trans, label_trans

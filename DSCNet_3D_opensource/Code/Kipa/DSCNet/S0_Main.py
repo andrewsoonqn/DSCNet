@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import argparse
-
-from S1_Pre_Getmeanstd import Getmeanstd
-from S2_Pre_Generate_Txt import Generate_Txt
-from S3_Train_Process import Train as train_standard
+from pathlib import Path
 
 """
 This code contains all the "Parameters" for the entire project -- <DSCNet>
@@ -28,6 +25,59 @@ tomography angiography during laparoscopic partial nephrectomy. European urology
 """
 
 
+def resolve_paths(args):
+    """Resolve every derived path without requiring trailing separators."""
+    root = Path(args.root_dir)
+    data = Path(args.data_dir)
+
+    defaults = {
+        "Tr_Image_dir": data / "train" / "image",
+        "Va_Image_dir": data / "val" / "image",
+        "Te_Image_dir": data / "test" / "image",
+        "Tr_Label_dir": data / "train" / "label",
+        "Va_Label_dir": data / "val" / "label",
+        "Te_Label_dir": data / "test" / "label",
+        "Dir_Txt": root / "Txt" / f"Txt_{args.run_label}",
+        "Dir_Log": root / "Log" / args.run_label,
+        "Dir_Save": root / "Results" / args.run_label,
+        "Dir_Weights": root / "Weights" / args.run_label,
+    }
+    for attribute, default in defaults.items():
+        value = getattr(args, attribute)
+        setattr(args, attribute, str(Path(value) if value else default))
+    args.Dir_Log = os.path.join(args.Dir_Log, "")
+
+    txt_dir = Path(args.Dir_Txt)
+    manifest_defaults = {
+        "Image_Tr_txt": txt_dir / "Image_Tr.txt",
+        "Image_Va_txt": txt_dir / "Image_Va.txt",
+        "Image_Te_txt": txt_dir / "Image_Te.txt",
+        "Label_Tr_txt": txt_dir / "Label_Tr.txt",
+        "Label_Va_txt": txt_dir / "Label_Va.txt",
+        "Label_Te_txt": txt_dir / "Label_Te.txt",
+    }
+    for attribute, default in manifest_defaults.items():
+        value = getattr(args, attribute)
+        setattr(args, attribute, str(Path(value) if value else default))
+
+    if args.Meanstd_name is None:
+        args.Meanstd_name = f"{args.run_label}_Meanstd.npy"
+    args.Meanstd_path = str(root / args.Meanstd_name)
+
+    if args.save_path is None:
+        args.save_path = str(root / "Results" / args.run_label / "DSCNet")
+    if args.save_path_max is None:
+        args.save_path_max = str(root / "Results" / args.run_label / "DSCNet_max")
+    if args.model_name is None:
+        args.model_name = f"DSCNet_{args.run_label}"
+    if args.model_name_max is None:
+        args.model_name_max = f"DSCNet_{args.run_label}_max"
+    if args.log_name is None:
+        args.log_name = f"DSCNet_{args.run_label}.log"
+
+    return args
+
+
 def Create_files(args):
     print("0 Start all process ...")
     if not os.path.exists(args.Dir_Txt):
@@ -40,30 +90,66 @@ def Create_files(args):
         os.makedirs(args.Dir_Weights)
 
 
+def _require_files(paths, action):
+    missing = [str(path) for path in paths if not Path(path).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"{action} requires prepared files: {', '.join(missing)}"
+        )
+
+
 def Process(args):
-    # step 0: Prepare all files in this projects
     Create_files(args)
 
-    # Step 1: Prepare image and calculate the "mean" and "std" for normalization
-    Getmeanstd(args, args.Tr_Image_dir, args.Tr_Meanstd_name)
-    Getmeanstd(args, args.Va_Image_dir, args.Va_Meanstd_name)
-    Getmeanstd(args, args.Te_Image_dir, args.Te_Meanstd_name)
+    if args.action == "prepare":
+        from S1_Pre_Getmeanstd import Getmeanstd
+        from S2_Pre_Generate_Txt import Generate_Paired_Txt
 
-    # Step 2: Prepare ".txt" files for training and testing data
-    Generate_Txt(args.Tr_Image_dir, args.Image_Tr_txt)
-    Generate_Txt(args.Va_Image_dir, args.Image_Va_txt)
-    Generate_Txt(args.Te_Image_dir, args.Image_Te_txt)
-    Generate_Txt(args.Tr_Label_dir, args.Label_Tr_txt)
-    Generate_Txt(args.Va_Label_dir, args.Label_Va_txt)
-    Generate_Txt(args.Te_Label_dir, args.Label_Te_txt)
+        Getmeanstd(args.Tr_Image_dir, args.Meanstd_path)
+        Generate_Paired_Txt(
+            args.Tr_Image_dir,
+            args.Tr_Label_dir,
+            args.Image_Tr_txt,
+            args.Label_Tr_txt,
+        )
+        Generate_Paired_Txt(
+            args.Va_Image_dir,
+            args.Va_Label_dir,
+            args.Image_Va_txt,
+            args.Label_Va_txt,
+        )
+        Generate_Paired_Txt(
+            args.Te_Image_dir,
+            args.Te_Label_dir,
+            args.Image_Te_txt,
+            args.Label_Te_txt,
+        )
+        return
 
-    # Step 3: Train the network
-    if args.training_pipeline == "optimized":
-        from S3_Optimized_Train_Process import Train as train_optimized
-
-        train_optimized(args)
+    if args.action == "train":
+        _require_files(
+            [
+                args.Meanstd_path,
+                args.Image_Tr_txt,
+                args.Label_Tr_txt,
+                args.Image_Va_txt,
+                args.Label_Va_txt,
+            ],
+            "training",
+        )
+        operation = "Train"
     else:
-        train_standard(args)
+        _require_files(
+            [args.Meanstd_path, args.Image_Te_txt, args.Label_Te_txt],
+            "evaluation",
+        )
+        operation = "Evaluate"
+
+    if args.training_pipeline == "optimized":
+        import S3_Optimized_Train_Process as pipeline
+    else:
+        import S3_Train_Process as pipeline
+    getattr(pipeline, operation)(args)
 
 
 if __name__ == "__main__":
@@ -116,19 +202,9 @@ if __name__ == "__main__":
         help="the address of the test label",
     )
     parser.add_argument(
-        "--Tr_Meanstd_name",
+        "--Meanstd_name",
         default=None,
-        help="Train image Mean and std for normalization",
-    )
-    parser.add_argument(
-        "--Va_Meanstd_name",
-        default=None,
-        help="Validation image Mean and std for normalization",
-    )
-    parser.add_argument(
-        "--Te_Meanstd_name",
-        default=None,
-        help="Test image Mean and std for normalization",
+        help="training-set mean and standard deviation file",
     )
 
     # files that are needed to be used to store contents
@@ -194,14 +270,17 @@ if __name__ == "__main__":
         "--n_classes", default=2, type=int, help="output channels"
     )  # test this
     parser.add_argument(
-        "--kernel_size", default=9, type=int, help="kernel size"
-    )  # 9 refers to 1*9/9*1 for DSConv (This parameter is not in use - kernel fixed by changing the S3_DSConv file in S3_DSCNet)
+        "--kernel_size", default=5, type=int, help="odd DSConv kernel size (>= 3)"
+    )
     parser.add_argument(
-        "--extend_scope", default=1.75, type=float, help="extend scope"
-    )  # This parameter is not used
+        "--extend_scope", default=1.75, type=float, help="DSConv offset range"
+    )
     parser.add_argument(
-        "--if_offset", default=True, type=bool, help="if offset"
-    )  # Whether to use the deformation or not
+        "--if_offset",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="enable learned DSConv offsets",
+    )
     parser.add_argument(
         "--n_basic_layer", default=16, type=int, help="basic layer numbers"
     )
@@ -226,8 +305,13 @@ if __name__ == "__main__":
     Reference: --ROI_shape: (128, 96, 96)  3090's memory occupancy is about 16653 MiB
     """
     parser.add_argument(
-        "--ROI_shape", default=(64, 64, 64), type=int, help="roi size"
-    )  # Original: 128, 96, 96
+        "--ROI_shape",
+        default=(64, 64, 64),
+        nargs=3,
+        type=int,
+        metavar=("DEPTH", "HEIGHT", "WIDTH"),
+        help="training patch size",
+    )
     parser.add_argument("--batch_size", default=1, type=int, help="batch size")
     parser.add_argument(
         "--sample_count",
@@ -271,8 +355,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_rlrop",
         default=False,
-        type=bool,
-        help="Use ReduceLROnPlateau (when training)",
+        action=argparse.BooleanOptionalAction,
+        help="use ReduceLROnPlateau while training",
     )
     parser.add_argument(
         "--rlr_factor", default=0.5, type=float, help="ReduceLROnPlateau Factor"
@@ -302,21 +386,29 @@ if __name__ == "__main__":
     parser.add_argument(
         "--verify_gap", default=1, type=int, help="validate every N epochs"
     )
-    parser.add_argument("--if_retrain", default=True, type=bool, help="If Retrain")
-    parser.add_argument("--if_onlytest", default=False, type=bool, help="If Only Test")
-
+    parser.add_argument(
+        "--if_retrain",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="start training without loading an existing checkpoint",
+    )
+    parser.add_argument(
+        "--action",
+        required=True,
+        choices=["prepare", "train", "evaluate"],
+        help="prepare artifacts, train with validation, or evaluate the frozen test set",
+    )
     parser.add_argument(
         "--if_fullprecision",
         default=True,
-        type=bool,
-        help="If Full Precision (disable AMP)",
+        action=argparse.BooleanOptionalAction,
+        help="disable automatic mixed precision",
     )
-
     parser.add_argument(
         "--use_earlystop",
         default=False,
-        type=bool,
-        help="Use Early Stopping (when training)",
+        action=argparse.BooleanOptionalAction,
+        help="use early stopping while training",
     )
     parser.add_argument(
         "--earlystop_threshold",
@@ -328,75 +420,5 @@ if __name__ == "__main__":
         "--earlystop_patience", default=30, type=int, help="Early Stopping Patience"
     )
 
-    args, unknown = parser.parse_known_args()
-
-    if args.Tr_Image_dir is None:
-        args.Tr_Image_dir = args.data_dir + "train/image/"
-    if args.Va_Image_dir is None:
-        args.Va_Image_dir = args.data_dir + "val/image/"
-    if args.Te_Image_dir is None:
-        args.Te_Image_dir = args.data_dir + "test/image/"
-
-    if args.Tr_Label_dir is None:
-        args.Tr_Label_dir = args.data_dir + "train/label/"
-    if args.Va_Label_dir is None:
-        args.Va_Label_dir = args.data_dir + "val/label/"
-    if args.Te_Label_dir is None:
-        args.Te_Label_dir = args.data_dir + "test/label/"
-
-    if args.Tr_Meanstd_name is None:
-        args.Tr_Meanstd_name = args.run_label + "_Tr_Meanstd.npy"
-    if args.Va_Meanstd_name is None:
-        args.Va_Meanstd_name = args.run_label + "_Va_Meanstd.npy"
-    if args.Te_Meanstd_name is None:
-        args.Te_Meanstd_name = args.run_label + "_Te_Meanstd.npy"
-
-    if args.Dir_Txt is None:
-        args.Dir_Txt = args.root_dir + "Txt/Txt_" + args.run_label + "/"
-    if args.Dir_Log is None:
-        args.Dir_Log = args.root_dir + "Log/" + args.run_label + "/"
-    if args.Dir_Save is None:
-        args.Dir_Save = args.root_dir + "Results/" + args.run_label + "/"
-    if args.Dir_Weights is None:
-        args.Dir_Weights = args.root_dir + "Weights/" + args.run_label + "/"
-
-    if args.Image_Tr_txt is None:
-        args.Image_Tr_txt = (
-            args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Tr.txt"
-        )
-    if args.Image_Va_txt is None:
-        args.Image_Va_txt = (
-            args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Va.txt"
-        )
-    if args.Image_Te_txt is None:
-        args.Image_Te_txt = (
-            args.root_dir + "Txt/Txt_" + args.run_label + "/Image_Te.txt"
-        )
-
-    if args.Label_Tr_txt is None:
-        args.Label_Tr_txt = (
-            args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Tr.txt"
-        )
-    if args.Label_Va_txt is None:
-        args.Label_Va_txt = (
-            args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Va.txt"
-        )
-    if args.Label_Te_txt is None:
-        args.Label_Te_txt = (
-            args.root_dir + "Txt/Txt_" + args.run_label + "/Label_Te.txt"
-        )
-
-    if args.save_path is None:
-        args.save_path = args.root_dir + "Results/" + args.run_label + "/DSCNet/"
-    if args.save_path_max is None:
-        args.save_path_max = (
-            args.root_dir + "Results/" + args.run_label + "/DSCNet_max/"
-        )
-    if args.model_name is None:
-        args.model_name = "DSCNet_" + args.run_label
-    if args.model_name_max is None:
-        args.model_name_max = "DSCNet_" + args.run_label + "_max"
-    if args.log_name is None:
-        args.log_name = "DSCNet_" + args.run_label + ".log"
-
+    args = resolve_paths(parser.parse_args())
     Process(args)
