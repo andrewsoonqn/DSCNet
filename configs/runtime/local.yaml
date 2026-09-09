@@ -1,0 +1,8 @@
+defaults:
+  - runtime_schema
+  - _self_
+
+kind: local
+experiment_root: artifacts/experiments
+formal: false
+allow_dirty: true

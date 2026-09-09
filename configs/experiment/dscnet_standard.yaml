@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - /experiment_schema
+  - /model: dscnet_standard
+  - /data: minivess_half
+  - /training: default
+  - /runtime: local
+  - _self_
+
+action: train

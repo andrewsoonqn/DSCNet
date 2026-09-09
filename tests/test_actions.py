@@ -33,9 +33,17 @@ class ActionDispatchTests(unittest.TestCase):
             path = root / name
             path.touch()
             paths[name] = str(path)
+        checkpoint = root / "DSCNet_trial_max"
+        checkpoint.touch()
         return SimpleNamespace(
             action=action,
             training_pipeline="standard",
+            Dir_Weights=str(root),
+            model_name="DSCNet_trial",
+            model_name_max=checkpoint.name,
+            if_retrain=True,
+            seed=2026,
+            deterministic=True,
             **paths,
         )
 
@@ -49,11 +57,14 @@ class ActionDispatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             args = self._prepared_args(Path(directory), "train")
             pipeline = self._pipeline()
-            with patch.object(S0_Main, "Create_files"), patch.dict(
+            with patch.object(S0_Main, "Create_files"), patch.object(
+                S0_Main, "apply_reproducibility"
+            ) as reproducibility, patch.dict(
                 sys.modules, {"S3_Train_Process": pipeline}
             ):
                 S0_Main.Process(args)
 
+            reproducibility.assert_called_once_with(2026, True)
             pipeline.Train.assert_called_once_with(args)
             pipeline.Evaluate.assert_not_called()
 
@@ -65,7 +76,9 @@ class ActionDispatchTests(unittest.TestCase):
             forbidden_preparation.Getmeanstd = Mock(
                 side_effect=AssertionError("evaluation attempted preprocessing")
             )
-            with patch.object(S0_Main, "Create_files"), patch.dict(
+            with patch.object(S0_Main, "Create_files"), patch.object(
+                S0_Main, "apply_reproducibility"
+            ), patch.dict(
                 sys.modules,
                 {
                     "S3_Train_Process": pipeline,
@@ -82,7 +95,9 @@ class ActionDispatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             args = self._prepared_args(Path(directory), "evaluate")
             Path(args.Meanstd_path).unlink()
-            with patch.object(S0_Main, "Create_files"):
+            with patch.object(S0_Main, "Create_files"), patch.object(
+                S0_Main, "apply_reproducibility"
+            ):
                 with self.assertRaisesRegex(FileNotFoundError, "evaluation requires"):
                     S0_Main.Process(args)
 

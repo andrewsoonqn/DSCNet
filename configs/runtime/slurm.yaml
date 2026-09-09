@@ -1,0 +1,26 @@
+defaults:
+  - runtime_schema
+  - _self_
+
+kind: slurm
+experiment_root: /home/a/andrewsq/data/urop/experiments
+formal: true
+allow_dirty: false
+remote_checkout: /home/a/andrewsq/dev/urop/dscnet
+remote_experiment_root: /home/a/andrewsq/data/urop/experiments
+mlflow:
+  tracking_uri: file:///home/a/andrewsq/data/urop/experiments/mlflow
+  experiment_name: dscnet
+  ui:
+    enabled: true
+    location: login
+    timeout_minutes: 60
+slurm:
+  host: xlogin1
+  partition: gpu-long
+  gpu_type: a100-40
+  gpus: 1
+  memory_gb: 32
+  cpus: 8
+  time_hours: 48
+  account: null

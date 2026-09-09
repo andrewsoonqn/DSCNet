@@ -1,0 +1,13 @@
+defaults:
+  - model_schema
+  - _self_
+
+training_pipeline: optimized
+n_channels: 1
+n_classes: 2
+kernel_size: 5
+extend_scope: 1.75
+if_offset: true
+n_basic_layer: 16
+dim: 8
+unet_layers: 4

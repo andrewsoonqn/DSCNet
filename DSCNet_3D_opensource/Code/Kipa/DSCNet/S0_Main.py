@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import argparse
+import random
 from pathlib import Path
 
 """
@@ -29,6 +30,8 @@ def resolve_paths(args):
     """Resolve every derived path without requiring trailing separators."""
     root = Path(args.root_dir)
     data = Path(args.data_dir)
+    args.root_dir = str(root)
+    args.data_dir = str(data)
 
     defaults = {
         "Tr_Image_dir": data / "train" / "image",
@@ -98,7 +101,90 @@ def _require_files(paths, action):
         )
 
 
+def _require_any_file(paths, action):
+    if not any(Path(path).is_file() for path in paths):
+        raise FileNotFoundError(
+            f"{action} requires one checkpoint: {', '.join(map(str, paths))}"
+        )
+
+
+def _require_directories(paths, action):
+    missing = [str(path) for path in paths if not Path(path).is_dir()]
+    if missing:
+        raise FileNotFoundError(
+            f"{action} requires dataset directories: {', '.join(missing)}"
+        )
+
+
+def validate_action_artifacts(args):
+    """Fail before dispatch when an action's declared inputs do not exist."""
+    if args.action == "prepare":
+        _require_directories(
+            [
+                args.Tr_Image_dir,
+                args.Tr_Label_dir,
+                args.Va_Image_dir,
+                args.Va_Label_dir,
+                args.Te_Image_dir,
+                args.Te_Label_dir,
+            ],
+            "preparation",
+        )
+    elif args.action == "train":
+        _require_files(
+            [
+                args.Meanstd_path,
+                args.Image_Tr_txt,
+                args.Label_Tr_txt,
+                args.Image_Va_txt,
+                args.Label_Va_txt,
+            ],
+            "training",
+        )
+        if not args.if_retrain:
+            _require_files(
+                [Path(args.Dir_Weights) / args.model_name],
+                "resumed training",
+            )
+    elif args.action == "evaluate":
+        _require_files(
+            [args.Meanstd_path, args.Image_Te_txt, args.Label_Te_txt],
+            "evaluation",
+        )
+        _require_any_file(
+            [
+                Path(args.Dir_Weights) / args.model_name_max,
+                Path(args.Dir_Weights) / args.model_name,
+            ],
+            "evaluation",
+        )
+    else:
+        raise ValueError(f"unsupported action: {args.action}")
+
+
+def apply_reproducibility(seed, deterministic):
+    """Apply the resolved reproducibility settings before pipeline imports."""
+    import numpy as np
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(deterministic)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = deterministic
+        torch.backends.cudnn.benchmark = not deterministic
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+
 def Process(args):
+    validate_action_artifacts(args)
+    apply_reproducibility(
+        getattr(args, "seed", 2026), getattr(args, "deterministic", True)
+    )
     Create_files(args)
 
     if args.action == "prepare":
@@ -126,24 +212,7 @@ def Process(args):
         )
         return
 
-    if args.action == "train":
-        _require_files(
-            [
-                args.Meanstd_path,
-                args.Image_Tr_txt,
-                args.Label_Tr_txt,
-                args.Image_Va_txt,
-                args.Label_Va_txt,
-            ],
-            "training",
-        )
-        operation = "Train"
-    else:
-        _require_files(
-            [args.Meanstd_path, args.Image_Te_txt, args.Label_Te_txt],
-            "evaluation",
-        )
-        operation = "Evaluate"
+    operation = "Train" if args.action == "train" else "Evaluate"
 
     if args.training_pipeline == "optimized":
         import S3_Optimized_Train_Process as pipeline
@@ -152,7 +221,8 @@ def Process(args):
     getattr(pipeline, operation)(args)
 
 
-if __name__ == "__main__":
+def build_legacy_parser():
+    """Build the argparse interface retained during Hydra shadow mode."""
     parser = argparse.ArgumentParser()
 
     # "root_dir" refers to the address of the outermost code, and "***" needs to be replaced
@@ -301,6 +371,13 @@ if __name__ == "__main__":
 
     # Training options
     parser.add_argument("--GPU_id", default="0", help="GPU ID")  # not in use
+    parser.add_argument("--seed", default=2026, type=int, help="experiment seed")
+    parser.add_argument(
+        "--deterministic",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="require deterministic PyTorch algorithms",
+    )
     """
     Reference: --ROI_shape: (128, 96, 96)  3090's memory occupancy is about 16653 MiB
     """
@@ -420,5 +497,12 @@ if __name__ == "__main__":
         "--earlystop_patience", default=30, type=int, help="Early Stopping Patience"
     )
 
-    args = resolve_paths(parser.parse_args())
-    Process(args)
+    return parser
+
+
+def parse_legacy_args(argv=None):
+    return resolve_paths(build_legacy_parser().parse_args(argv))
+
+
+if __name__ == "__main__":
+    Process(parse_legacy_args())

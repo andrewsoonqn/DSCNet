@@ -1,0 +1,30 @@
+defaults:
+  - training_schema
+  - _self_
+
+ROI_shape: [64, 64, 64]
+batch_size: 1
+sample_count: 1
+predict_batch_size: 4
+lr: 0.0001
+min_lr: 0.000005
+poly_decay_power: 0.9
+beta: 0.01
+min_beta: 0.000001
+beta_decay_power: 2.0
+use_rlrop: false
+rlr_factor: 0.5
+rlr_threshold: 0.002
+rlr_patience: 10
+rlr_cooldown: 2
+start_train_epoch: 1
+start_verify_epoch: 51
+n_epochs: 100
+verify_gap: 1
+if_retrain: true
+if_fullprecision: true
+use_earlystop: false
+earlystop_threshold: 0.002
+earlystop_patience: 30
+seed: 2026
+deterministic: true
