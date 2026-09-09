@@ -16,6 +16,8 @@ from expctl import (
     CommandResult,
     ExpctlError,
     ExperimentController,
+    SubprocessTransport,
+    _bounded_detail,
     _execution_dirty_paths,
 )
 
@@ -163,6 +165,8 @@ class ExpctlControllerTests(unittest.TestCase):
             root = Path(directory)
             controller = self._controller(root)
             record = controller._stage(EXPERIMENT, OVERRIDES)
+            self.assertEqual(record["controller_version"], "1")
+            self.assertEqual(record["pi_extension_version"], "1")
             control = root / "runs" / record["run_id"] / "control"
             resolved = OmegaConf.load(control / "resolved-config.yaml")
             with patch.dict(
@@ -334,6 +338,70 @@ class ExpctlControllerTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ExpctlError, "unknown run ID"):
                 controller.cancel("0" * 16)
+
+    def test_submit_rejects_tampered_existing_routing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            root = Path(directory)
+            controller = self._controller(root, transport)
+            record = controller._stage(EXPERIMENT, OVERRIDES)
+            path = root / "runs" / record["run_id"] / "control" / "run-manifest.json"
+            original = json.loads(path.read_text())
+            cases = {
+                "run_id": "f" * 16,
+                "host": "attacker.example",
+                "account": "untrusted",
+                "remote_root": "/tmp/escape",
+                "remote_run_dir": "/tmp/escape",
+            }
+            for field, value in cases.items():
+                tampered = dict(original)
+                tampered[field] = value
+                path.write_text(json.dumps(tampered))
+                with self.subTest(field=field):
+                    with self.assertRaisesRegex(ExpctlError, "recorded"):
+                        controller.submit(EXPERIMENT, OVERRIDES)
+                    self.assertEqual(transport.calls, [])
+                path.write_text(json.dumps(original))
+
+    def test_run_operations_reject_tampered_local_routing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            root = Path(directory)
+            controller = self._controller(root, transport)
+            record = controller.submit(EXPERIMENT, OVERRIDES)
+            path = root / "runs" / record["run_id"] / "control" / "run-manifest.json"
+            original = json.loads(path.read_text())
+            cases = {
+                "run_id": "f" * 16,
+                "host": "attacker.example",
+                "remote_root": "/tmp/escape",
+                "remote_run_dir": "/tmp/escape",
+            }
+            for field, value in cases.items():
+                tampered = dict(original)
+                tampered[field] = value
+                path.write_text(json.dumps(tampered))
+                calls_before = len(transport.calls)
+                with self.subTest(field=field):
+                    with self.assertRaisesRegex(ExpctlError, "recorded"):
+                        controller.cancel(record["run_id"])
+                    self.assertEqual(len(transport.calls), calls_before)
+            path.write_text("not json")
+            with self.assertRaisesRegex(ExpctlError, "manifest is invalid"):
+                controller.status(record["run_id"])
+
+    def test_subprocess_transport_times_out_with_a_bounded_error(self):
+        transport = SubprocessTransport()
+        with patch(
+            "expctl.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["ssh"], 120),
+        ):
+            with self.assertRaisesRegex(ExpctlError, "ssh timed out after 120 seconds"):
+                transport.ssh("xlogin1", ["true"])
+        detail = _bounded_detail("\x1b[31m" + "x" * 5000 + "\x1b[0m")
+        self.assertNotIn("\x1b", detail)
+        self.assertLessEqual(len(detail), 4096 + len("[truncated]\n"))
 
     def test_fetch_accepts_declared_artifacts_and_verifies_checksums(self):
         with tempfile.TemporaryDirectory() as directory:

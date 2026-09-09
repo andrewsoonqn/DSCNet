@@ -307,17 +307,43 @@ def cancel(args: argparse.Namespace) -> dict:
     return {"job_id": args.job_id, "status": "cancellation_requested"}
 
 
+MAX_LOG_FILES = 16
+MAX_LOG_BYTES = 48 * 1024
+
+
+def _bounded_log_tail(path: Path, line_limit: int, byte_limit: int) -> tuple[list[str], bool]:
+    size = path.stat().st_size
+    read_limit = max(0, byte_limit - 1)
+    start = max(0, size - read_limit)
+    with path.open("rb") as stream:
+        stream.seek(start)
+        data = stream.read(read_limit)
+    lines = data.splitlines()
+    selected = lines[-line_limit:]
+    return [line.decode("utf-8", errors="ignore") for line in selected], (
+        start > 0 or len(lines) > line_limit
+    )
+
+
 def logs(args: argparse.Namespace) -> dict:
     run_dir = Path(args.run_dir).resolve()
-    output: dict[str, list[str]] = {}
-    for path in sorted((run_dir / "logs").glob("*.log")) + sorted(
+    candidates = sorted((run_dir / "logs").glob("*.log")) + sorted(
         (run_dir / "logs").glob("slurm-*.out")
-    ):
+    )
+    output: dict[str, list[str]] = {}
+    remaining = MAX_LOG_BYTES
+    truncated = len(candidates) > MAX_LOG_FILES
+    for path in candidates[:MAX_LOG_FILES]:
         if path.is_symlink() or not path.resolve().is_relative_to(run_dir):
             continue
-        lines = path.read_text(errors="replace").splitlines()
-        output[path.name] = lines[-args.lines :]
-    return {"run_id": run_dir.name, "logs": output}
+        lines, file_truncated = _bounded_log_tail(path, args.lines, remaining)
+        output[path.name] = lines
+        remaining -= sum(len(line.encode("utf-8")) + 1 for line in lines)
+        truncated = truncated or file_truncated
+        if remaining <= 0:
+            truncated = True
+            break
+    return {"run_id": run_dir.name, "logs": output, "truncated": truncated}
 
 
 def verify_artifacts(args: argparse.Namespace) -> dict:

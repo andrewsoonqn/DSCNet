@@ -190,6 +190,29 @@ class ExpctlRemoteTests(unittest.TestCase):
             )
         self.assertEqual(result["dataset_digest"], expected)
 
+    def test_logs_bound_files_bytes_and_newline_free_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "runs" / "abc"
+            logs = run / "logs"
+            logs.mkdir(parents=True)
+            (logs / "pipeline.log").write_bytes(b"x" * (expctl_remote.MAX_LOG_BYTES * 2))
+            for index in range(expctl_remote.MAX_LOG_FILES + 2):
+                (logs / f"slurm-{index:02d}.out").write_text(f"job {index}\n")
+            result = expctl_remote.logs(
+                argparse.Namespace(run_dir=str(run), lines=1000)
+            )
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(len(result["logs"]), expctl_remote.MAX_LOG_FILES)
+        payload_size = sum(
+            len(line.encode("utf-8")) + 1
+            for lines in result["logs"].values()
+            for line in lines
+        )
+        self.assertLessEqual(payload_size, expctl_remote.MAX_LOG_BYTES)
+        self.assertLessEqual(
+            len(result["logs"]["pipeline.log"][0]), expctl_remote.MAX_LOG_BYTES
+        )
+
     def test_verify_artifacts_checks_actual_size_before_transfer(self):
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory) / "run"

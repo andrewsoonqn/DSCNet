@@ -19,3 +19,6 @@ DSCNet_3D_opensource/Txt
 DSCNet_3D_opensource/Weights
 Data/
 logs/
+artifacts/
+notebooks/.marimo/
+session-*.md

@@ -36,6 +36,7 @@ from S4_Experiment_Config import (
 from S4_Experiment_Tracking import build_dataset_manifest, collect_git_provenance, sha256_file
 
 CONTROLLER_VERSION = "1"
+PI_EXTENSION_VERSION = "1"
 ALLOWED_HOST = "xlogin1"
 ALLOWED_REMOTE_CHECKOUT = "/home/a/andrewsq/dev/urop/dscnet"
 ALLOWED_REMOTE_ROOT = "/home/a/andrewsq/data/urop/experiments"
@@ -49,6 +50,9 @@ MAX_TIME_HOURS = 48
 MAX_ARTIFACT_MANIFEST_BYTES = 1024 * 1024
 MAX_AUTO_FILE_BYTES = 8 * 1024**3
 MAX_AUTO_TOTAL_BYTES = 12 * 1024**3
+MAX_ERROR_DETAIL_CHARS = 4096
+SSH_TIMEOUT_SECONDS = 120
+TRANSFER_TIMEOUT_SECONDS = 1800
 RUN_ID = re.compile(r"^[0-9a-f]{16}(?:-a[1-9][0-9]*)?$")
 JOB_ID = re.compile(r"^[0-9]+$")
 EXECUTION_SUFFIXES = {".py", ".yaml", ".yml", ".sh", ".sbatch", ".toml"}
@@ -66,29 +70,36 @@ class CommandResult:
 
 
 class SubprocessTransport:
-    def ssh(self, host: str, argv: Sequence[str]) -> CommandResult:
-        result = subprocess.run(
-            ["ssh", host, "--", shlex.join(argv)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+    @staticmethod
+    def _run(argv: Sequence[str], timeout: int) -> CommandResult:
+        try:
+            result = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ExpctlError(f"{argv[0]} timed out after {timeout} seconds") from error
         return CommandResult(result.returncode, result.stdout, result.stderr)
 
-    def sync_to(self, paths: Sequence[Path], host: str, remote_dir: str) -> CommandResult:
-        result = subprocess.run(
-            ["rsync", "-a", "--protect-args", *map(str, paths), f"{host}:{remote_dir}/"],
-            check=False,
-            capture_output=True,
-            text=True,
+    def ssh(self, host: str, argv: Sequence[str]) -> CommandResult:
+        return self._run(
+            ["ssh", host, "--", shlex.join(argv)], SSH_TIMEOUT_SECONDS
         )
-        return CommandResult(result.returncode, result.stdout, result.stderr)
+
+    def sync_to(self, paths: Sequence[Path], host: str, remote_dir: str) -> CommandResult:
+        return self._run(
+            ["rsync", "-a", "--protect-args", *map(str, paths), f"{host}:{remote_dir}/"],
+            TRANSFER_TIMEOUT_SECONDS,
+        )
 
     def fetch_file(
         self, host: str, remote_path: str, local_path: Path, max_size: int
     ) -> CommandResult:
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
+        return self._run(
             [
                 "rsync",
                 "-a",
@@ -97,11 +108,8 @@ class SubprocessTransport:
                 f"{host}:{remote_path}",
                 str(local_path),
             ],
-            check=False,
-            capture_output=True,
-            text=True,
+            TRANSFER_TIMEOUT_SECONDS,
         )
-        return CommandResult(result.returncode, result.stdout, result.stderr)
 
     def fetch_files(
         self, host: str, remote_root: str, relative_paths: Sequence[str], destination: Path
@@ -111,7 +119,7 @@ class SubprocessTransport:
             stream.write("\n".join(relative_paths) + "\n")
             files_from = stream.name
         try:
-            result = subprocess.run(
+            result = self._run(
                 [
                     "rsync",
                     "-a",
@@ -121,9 +129,7 @@ class SubprocessTransport:
                     f"{host}:{remote_root}/",
                     str(destination) + "/",
                 ],
-                check=False,
-                capture_output=True,
-                text=True,
+                TRANSFER_TIMEOUT_SECONDS,
             )
         finally:
             Path(files_from).unlink(missing_ok=True)
@@ -146,9 +152,21 @@ def _canonical_digest(value: Any) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _bounded_detail(value: str) -> str:
+    value = re.sub(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\\\))", "", value)
+    value = "".join(
+        character
+        for character in value
+        if character in "\n\t" or 32 <= ord(character) < 127 or ord(character) >= 160
+    ).strip()
+    if len(value) > MAX_ERROR_DETAIL_CHARS:
+        value = "[truncated]\n" + value[-MAX_ERROR_DETAIL_CHARS:]
+    return value or "no detail"
+
+
 def _checked(result: CommandResult, operation: str) -> str:
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "no detail"
+        detail = _bounded_detail(result.stderr or result.stdout)
         raise ExpctlError(f"{operation} failed: {detail}")
     return result.stdout.strip()
 
@@ -268,7 +286,9 @@ def _build_source_snapshot(destination: Path, formal: bool, provenance: dict[str
                 capture_output=True,
             )
             if applied.returncode != 0:
-                raise ExpctlError(f"could not apply dirty source patch: {applied.stderr.strip()}")
+                raise ExpctlError(
+                    f"could not apply dirty source patch: {_bounded_detail(applied.stderr)}"
+                )
         manifest = _source_manifest(source)
         raw_tar = temporary / "source.tar"
         with tarfile.open(raw_tar, "w") as bundle:
@@ -470,7 +490,7 @@ class ExperimentController:
             run_dir = self.state_root / "runs" / run_id
             existing_manifest = run_dir / "control" / "run-manifest.json"
             if existing_manifest.is_file():
-                return json.loads(existing_manifest.read_text())
+                return self._record(run_id)[1]
             resolved_text = identity_template.replace("RUN_PLACEHOLDER", run_id)
             control = run_dir / "control"
             control.mkdir(parents=True, exist_ok=True)
@@ -495,6 +515,7 @@ class ExperimentController:
             manifest = {
                 "schema_version": 1,
                 "controller_version": CONTROLLER_VERSION,
+                "pi_extension_version": PI_EXTENSION_VERSION,
                 "run_id": run_id,
                 "attempt": 1,
                 "experiment": name,
@@ -607,7 +628,8 @@ exit "$finalize_status"
                 _atomic_json(control / "run-manifest.json", staged)
             run_id = staged["run_id"]
             local_control = self.state_root / "runs" / run_id / "control"
-            existing = json.loads((local_control / "run-manifest.json").read_text())
+            _, existing = self._record(run_id)
+            staged = existing
             if existing.get("job_id") and not retry:
                 return existing
             if existing.get("state") == "submission_rejected" and not retry:
@@ -633,7 +655,7 @@ exit "$finalize_status"
                     ],
                 )
                 if recovery.returncode != 0:
-                    detail = recovery.stderr.strip() or recovery.stdout.strip()
+                    detail = _bounded_detail(recovery.stderr or recovery.stdout)
                     raise ExpctlError(
                         f"Slurm submission recovery failed: {detail or 'no detail'}"
                     )
@@ -755,7 +777,7 @@ exit "$finalize_status"
                     ],
                 )
                 if submission.returncode != 0:
-                    detail = submission.stderr.strip() or submission.stdout.strip()
+                    detail = _bounded_detail(submission.stderr or submission.stdout)
                     staged["state"] = (
                         "submission_rejected"
                         if "submission rejected:" in detail
@@ -773,7 +795,7 @@ exit "$finalize_status"
                     "submission_unknown",
                 }:
                     staged["state"] = "submission_unknown"
-                staged["error"] = str(error)
+                staged["error"] = _bounded_detail(str(error))
                 _atomic_json(local_control / "run-manifest.json", staged)
                 raise
             _atomic_json(local_control / "run-manifest.json", staged)
@@ -785,7 +807,22 @@ exit "$finalize_status"
         path = self.state_root / "runs" / run_id / "control" / "run-manifest.json"
         if not path.is_file():
             raise ExpctlError(f"unknown run ID: {run_id}")
-        return path, json.loads(path.read_text())
+        try:
+            record = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as error:
+            raise ExpctlError("recorded run manifest is invalid") from error
+        expected_remote_dir = f"{ALLOWED_REMOTE_ROOT}/runs/{run_id}"
+        if not isinstance(record, dict) or record.get("run_id") != run_id:
+            raise ExpctlError("recorded run identity does not match its path")
+        if record.get("host") != ALLOWED_HOST:
+            raise ExpctlError("recorded run host is not allowlisted")
+        if record.get("account") not in TRUSTED_ACCOUNTS:
+            raise ExpctlError("recorded Slurm account is not allowlisted")
+        if record.get("remote_root") != ALLOWED_REMOTE_ROOT:
+            raise ExpctlError("recorded remote root is not allowlisted")
+        if record.get("remote_run_dir") != expected_remote_dir:
+            raise ExpctlError("recorded remote run directory is invalid")
+        return path, record
 
     def _job_operation(self, run_id: str, operation: str, extra: Sequence[str] = ()) -> dict[str, Any]:
         path, record = self._record(run_id)
@@ -970,7 +1007,10 @@ def main() -> int:
         else:
             result = getattr(controller, args.command)(args.run_id)
     except Exception as error:
-        print(json.dumps({"command": args.command, "error": str(error)}), file=sys.stderr)
+        print(
+            json.dumps({"command": args.command, "error": _bounded_detail(str(error))}),
+            file=sys.stderr,
+        )
         return 1
     _json_print(result)
     return 0
