@@ -448,16 +448,32 @@ class ExpctlRemoteTests(unittest.TestCase):
             (run / "outputs" / "weights").mkdir(parents=True)
             (run / "outputs" / "predictions").mkdir(parents=True)
             (run / "control" / "resolved-config.yaml").write_text("action: train\n")
+            (run / "control" / "source.tar.gz").write_bytes(b"source")
+            (run / "control" / "git.json").write_text("{}\n")
+            (run / "control" / "environment-lock.json").write_text("{}\n")
+            (run / "control" / "submission.json").write_text('{"job_id":"123"}\n')
             (run / "control" / "Mean_Std.npy").write_bytes(b"normalization")
             (run / "logs" / "pipeline.log").write_text("done\n")
+            (run / "logs" / "slurm-123.out").write_text("still mutable\n")
             (run / "outputs" / "weights" / "model_best.pth").write_bytes(b"best")
+            (run / "outputs" / "weights" / "model_latest.pth").write_bytes(b"latest")
             (run / "outputs" / "predictions" / "large.nii.gz").write_bytes(b"large")
             result = expctl_remote.finalize(
-                argparse.Namespace(run_dir=str(run), best_checkpoint="model_best.pth")
+                argparse.Namespace(
+                    run_dir=str(run),
+                    best_checkpoint="model_best.pth",
+                    latest_checkpoint="model_latest.pth",
+                )
             )
         paths = {item["path"] for item in result["artifacts"]}
         self.assertIn("control/Mean_Std.npy", paths)
+        self.assertIn("control/source.tar.gz", paths)
+        self.assertIn("control/git.json", paths)
+        self.assertIn("control/environment-lock.json", paths)
+        self.assertIn("control/submission.json", paths)
         self.assertIn("outputs/weights/model_best.pth", paths)
+        self.assertIn("outputs/weights/model_latest.pth", paths)
+        self.assertNotIn("logs/slurm-123.out", paths)
         self.assertNotIn("outputs/predictions/large.nii.gz", paths)
 
 

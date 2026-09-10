@@ -111,6 +111,32 @@ For evaluating a trained 3D model:
 
 - `bash run_models.sh evaluate unet4 data.Dir_Weights=<path/to/weights/dir> data.model_name_max=<checkpoint_name>`
 
+##### Cluster experiment lifecycle:
+
+Formal cluster runs require a clean committed execution tree. From the repository root on the laptop:
+
+1. Validate the experiment without submitting it:
+
+   `.venv/bin/python tools/expctl.py verify configs/experiment/dscnet_standard.yaml --set action=prepare`
+
+2. Submit it once and save the returned run ID:
+
+   `.venv/bin/python tools/expctl.py submit configs/experiment/dscnet_standard.yaml --set action=prepare`
+
+3. Check the scheduler state and bounded logs:
+
+   `.venv/bin/python tools/expctl.py status <run_id>`
+
+   `.venv/bin/python tools/expctl.py logs <run_id>`
+
+4. After the state is `COMPLETED`, retrieve and checksum-verify the declared artifacts:
+
+   `.venv/bin/python tools/expctl.py fetch <run_id>`
+
+The fetched directory contains the resolved config, Git evidence, environment lock, dataset hashes, source manifest and source snapshot, submission receipt, stable logs, final metrics when produced, and both latest and best checkpoints when produced. This is the recovery bundle.
+
+To continue interrupted training, point `data.Dir_Weights` at the fetched weights directory, retain the recorded `data.model_name`, set `training.if_retrain=false`, set `training.start_train_epoch` to the checkpoint's next epoch, and submit with `--retry`. `expctl` creates a new immutable attempt, stages and verifies the latest checkpoint, and keeps the same logical experiment identity. Do not use `--retry` to create the first attempt.
+
 ##### Temporary MLflow UI:
 
 Training writes directly to the shared MLflow database and artifact directory. The UI does not need to be running during training.

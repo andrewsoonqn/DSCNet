@@ -262,6 +262,7 @@ class ExpctlControllerTests(unittest.TestCase):
         self.assertIn("export DSCNET_RESOLVED_CONFIG=", script)
         self.assertIn("export DSCNET_SOURCE_ROOT=", script)
         self.assertIn("/run_models.sbatch", script)
+        self.assertIn("--latest-checkpoint", script)
         self.assertNotIn("S0_Main.py", script)
 
     def test_resource_and_path_allowlists_fail_closed(self):
@@ -702,7 +703,11 @@ class ExpctlControllerTests(unittest.TestCase):
                 "control/resolved-config.yaml": b"action: prepare\n",
                 "control/dataset-manifest.json": b"{}\n",
                 "control/source-manifest.json": b"{}\n",
+                "control/source.tar.gz": b"source archive",
+                "control/git.json": b"{}\n",
+                "control/environment-lock.json": b"{}\n",
                 "control/run-manifest.json": b"{}\n",
+                "control/submission.json": b'{"job_id":"12345"}\n',
                 "logs/pipeline.log": b"complete\n",
                 "outputs/final-metrics.json": b"{}\n",
             }
@@ -721,8 +726,22 @@ class ExpctlControllerTests(unittest.TestCase):
                 **payloads,
                 "control/artifacts.json": json.dumps(artifact_manifest).encode(),
             }
+            stale = (
+                Path(directory)
+                / "runs"
+                / record["run_id"]
+                / "fetched"
+                / "logs"
+                / "slurm-old.out"
+            )
+            stale.parent.mkdir(parents=True)
+            stale.write_text("stale")
             fetched = controller.fetch(record["run_id"])
+            stale_remained = stale.exists()
+            destination_exists = Path(fetched["destination"]).is_dir()
         self.assertEqual(set(fetched["artifacts"]), set(payloads))
+        self.assertFalse(stale_remained)
+        self.assertTrue(destination_exists)
 
     def test_fetch_rejects_oversized_declared_artifact_before_transfer(self):
         with tempfile.TemporaryDirectory() as directory:

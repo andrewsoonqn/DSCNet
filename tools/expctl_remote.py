@@ -738,7 +738,12 @@ def finalize(args: argparse.Namespace) -> dict:
             "resolved-config.yaml",
             "dataset-manifest.json",
             "source-manifest.json",
+            "source.tar.gz",
+            "git.json",
+            "dirty.patch",
+            "environment-lock.json",
             "run-manifest.json",
+            "submission.json",
             "Image_Tr.txt",
             "Label_Tr.txt",
             "Image_Va.txt",
@@ -751,10 +756,16 @@ def finalize(args: argparse.Namespace) -> dict:
         run_dir / "outputs" / "final-metrics.json",
         run_dir / "outputs" / "run-result.json",
     ]
-    candidates.extend(sorted((run_dir / "logs").glob("*")))
-    best_name = args.best_checkpoint
-    if best_name:
-        candidates.append(run_dir / "outputs" / "weights" / best_name)
+    candidates.extend(
+        path
+        for path in sorted((run_dir / "logs").glob("*"))
+        if not path.name.startswith("slurm-")
+    )
+    for checkpoint_name in (args.best_checkpoint, args.latest_checkpoint):
+        if checkpoint_name:
+            checkpoint = run_dir / "outputs" / "weights" / checkpoint_name
+            if checkpoint not in candidates:
+                candidates.append(checkpoint)
     artifacts = []
     for path in candidates:
         if (
@@ -809,6 +820,7 @@ def build_parser() -> argparse.ArgumentParser:
     final = subparsers.add_parser("finalize")
     final.add_argument("--run-dir", required=True)
     final.add_argument("--best-checkpoint", required=True)
+    final.add_argument("--latest-checkpoint", default="")
     return parser
 
 

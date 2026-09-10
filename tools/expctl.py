@@ -714,6 +714,7 @@ class ExperimentController:
                 "dataset_digest": dataset["digest"],
                 "source_digest": source_manifest["digest"],
                 "best_checkpoint_name": legacy_paths.model_name_max,
+                "latest_checkpoint_name": legacy_paths.model_name,
                 "normalization": normalization,
                 "evaluation_checkpoint": evaluation_checkpoint,
                 "training_checkpoint": training_checkpoint,
@@ -761,7 +762,7 @@ export DSCNET_SOURCE_ROOT={shlex.quote(source)}
 export DSCNET_RESOLVED_CONFIG={shlex.quote(control + '/resolved-config.yaml')}
 {command} 2>&1 | tee {shlex.quote(remote_run + '/logs/pipeline.log')}
 pipeline_status=${{PIPESTATUS[0]}}
-{shlex.quote(slurm.python_path)} {shlex.quote(helper)} finalize --run-dir {shlex.quote(remote_run)} --best-checkpoint {shlex.quote(to_runtime_namespace(config).model_name_max)}
+{shlex.quote(slurm.python_path)} {shlex.quote(helper)} finalize --run-dir {shlex.quote(remote_run)} --best-checkpoint {shlex.quote(to_runtime_namespace(config).model_name_max)} --latest-checkpoint {shlex.quote(to_runtime_namespace(config).model_name)}
 finalize_status=$?
 if [[ "$pipeline_status" -ne 0 ]]; then
   exit "$pipeline_status"
@@ -1250,7 +1251,10 @@ exit "$finalize_status"
 
     def fetch(self, run_id: str) -> dict[str, Any]:
         _, record = self._record(run_id)
-        local = self.state_root / "runs" / run_id / "fetched"
+        run_root = self.state_root / "runs" / run_id
+        destination = run_root / "fetched"
+        local = run_root / f".fetched-{os.getpid()}"
+        shutil.rmtree(local, ignore_errors=True)
         artifacts_json = local / "control" / "artifacts.json"
         remote_manifest = f"{record['remote_run_dir']}/control/artifacts.json"
         size_text = _checked(
@@ -1277,7 +1281,12 @@ exit "$finalize_status"
             "control/resolved-config.yaml",
             "control/dataset-manifest.json",
             "control/source-manifest.json",
+            "control/source.tar.gz",
+            "control/git.json",
+            "control/dirty.patch",
+            "control/environment-lock.json",
             "control/run-manifest.json",
+            "control/submission.json",
             "control/Image_Tr.txt",
             "control/Label_Tr.txt",
             "control/Image_Va.txt",
@@ -1299,7 +1308,11 @@ exit "$finalize_status"
             ) or (
                 len(pure.parts) == 3
                 and pure.parts[:2] == ("outputs", "weights")
-                and pure.name == record["best_checkpoint_name"]
+                and pure.name
+                in {
+                    record["best_checkpoint_name"],
+                    record.get("latest_checkpoint_name"),
+                }
             )
             if not allowed or pure.is_absolute() or ".." in pure.parts:
                 raise ExpctlError(f"remote artifact manifest contains undeclared path: {path}")
@@ -1319,7 +1332,11 @@ exit "$finalize_status"
             "control/resolved-config.yaml",
             "control/dataset-manifest.json",
             "control/source-manifest.json",
+            "control/source.tar.gz",
+            "control/git.json",
+            "control/environment-lock.json",
             "control/run-manifest.json",
+            "control/submission.json",
         }
         if not required.issubset(seen):
             raise ExpctlError("remote artifact manifest is missing required run records")
@@ -1360,8 +1377,23 @@ exit "$finalize_status"
                 failures.append(artifact["path"])
         if failures:
             raise ExpctlError("artifact checksum verification failed: " + ", ".join(failures))
-        result = {"run_id": run_id, "destination": str(local), "artifacts": paths}
+        result = {
+            "run_id": run_id,
+            "destination": str(destination),
+            "artifacts": paths,
+        }
         _atomic_json(local / "fetch.json", result)
+        backup = run_root / ".fetched-backup"
+        shutil.rmtree(backup, ignore_errors=True)
+        if destination.exists():
+            os.replace(destination, backup)
+        try:
+            os.replace(local, destination)
+        except Exception:
+            if backup.exists():
+                os.replace(backup, destination)
+            raise
+        shutil.rmtree(backup, ignore_errors=True)
         return result
 
 
