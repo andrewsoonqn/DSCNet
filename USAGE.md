@@ -114,3 +114,27 @@ For preparing and training the 3D model:
 For evaluating a trained 3D model:
 
 - `bash run_models.sh evaluate unet4 --Dir_Weights <path/to/weights/dir> --model_name_max <checkpoint_name>`
+
+##### Temporary MLflow UI:
+
+Training writes directly to the shared MLflow database and artifact directory. The UI does not need to be running during training.
+
+From the repository root on the laptop:
+
+1. Start the temporary login-node reader and localhost-only SSH tunnel:
+
+   `.venv/bin/python tools/expctl.py ui start`
+
+2. Open the returned `http://127.0.0.1:5000` URL in a browser. Enter the returned reader username and password when prompted.
+
+3. Check both the remote reader and local tunnel:
+
+   `.venv/bin/python tools/expctl.py ui status`
+
+4. Stop both processes when finished:
+
+   `.venv/bin/python tools/expctl.py ui stop`
+
+Use `--local-port <port>` after `ui start` if port 5000 is already needed by another local process. The remote reader always binds to `127.0.0.1`, and the SSH tunnel always binds to local `127.0.0.1`; neither process listens on a public interface. Because the login node is shared, loopback binding alone does not isolate users: the reader also requires a project-specific random basic-auth credential stored in a user-private cluster directory. The configured 60-minute timeout stops the reader and tunnel without deleting runs or interrupting training.
+
+MLflow metadata is stored at `/home/a/andrewsq/data/urop/experiments/mlflow.db`. Artifacts are stored at `/home/a/andrewsq/data/urop/experiments/mlflow-artifacts`. `expctl` does not automatically delete either location. No separate project backup is configured or assumed, so retrieve the declared run artifacts needed for recovery and monitor the experiment filesystem quota. Automatic retrieval fails closed above 8 GiB per file or 12 GiB per run. The current standard and optimized model checkpoint estimate, including populated Adam state, is about 0.052 GiB and fits those limits.

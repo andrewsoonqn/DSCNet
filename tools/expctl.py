@@ -9,16 +9,21 @@ import fcntl
 import gzip
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import secrets
 import shlex
 import shutil
+import signal
+import socket
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from typing import Any, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +58,9 @@ MAX_AUTO_TOTAL_BYTES = 12 * 1024**3
 MAX_ERROR_DETAIL_CHARS = 4096
 SSH_TIMEOUT_SECONDS = 120
 TRANSFER_TIMEOUT_SECONDS = 1800
+MLFLOW_UI_PORT = 5000
+MAX_UI_TIMEOUT_MINUTES = 480
+MAX_TUNNEL_SECONDS = MAX_UI_TIMEOUT_MINUTES * 60
 RUN_ID = re.compile(r"^[0-9a-f]{16}(?:-a[1-9][0-9]*)?$")
 JOB_ID = re.compile(r"^[0-9]+$")
 EXECUTION_SUFFIXES = {".py", ".yaml", ".yml", ".sh", ".sbatch", ".toml"}
@@ -384,13 +392,162 @@ def _policy(config: Any) -> None:
         raise ExpctlError("; ".join(failures))
 
 
+def _port_is_open(port: int) -> bool:
+    with socket.socket() as probe:
+        probe.settimeout(0.2)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _process_has_token(pid: int, token: str) -> bool:
+    if not isinstance(pid, int) or pid <= 1 or not re.fullmatch(r"[0-9a-f]{32}", token):
+        return False
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "_ui-tunnel" in result.stdout and token in result.stdout
+
+
+class LocalTunnelManager:
+    def start(
+        self,
+        state_root: Path,
+        local_port: int,
+        remote_port: int,
+        duration_seconds: int,
+    ) -> dict[str, Any]:
+        if _port_is_open(local_port):
+            raise ExpctlError(f"local port {local_port} is already in use")
+        state_root.mkdir(parents=True, exist_ok=True)
+        token = secrets.token_hex(16)
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "_ui-tunnel",
+            "--host",
+            ALLOWED_HOST,
+            "--local-port",
+            str(local_port),
+            "--remote-port",
+            str(remote_port),
+            "--duration-seconds",
+            str(duration_seconds),
+            "--token",
+            token,
+        ]
+        log_path = state_root / "ui-tunnel.log"
+        with log_path.open("ab") as log:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        for _ in range(100):
+            if process.poll() is not None:
+                raise ExpctlError("SSH tunnel exited before becoming ready")
+            if _port_is_open(local_port):
+                return {
+                    "tunnel_pid": process.pid,
+                    "tunnel_token": token,
+                    "local_port": local_port,
+                    "remote_port": remote_port,
+                }
+            time.sleep(0.1)
+        record = {"tunnel_pid": process.pid, "tunnel_token": token}
+        if not self.stop(record):
+            raise ExpctlError("SSH tunnel did not become ready and did not stop")
+        raise ExpctlError("SSH tunnel did not become ready")
+
+    def is_alive(self, record: dict[str, Any]) -> bool:
+        return _process_has_token(
+            record.get("tunnel_pid"), record.get("tunnel_token", "")
+        )
+
+    def stop(self, record: dict[str, Any]) -> bool:
+        if not self.is_alive(record):
+            return False
+        pid = record["tunnel_pid"]
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return True
+        for _ in range(50):
+            if not self.is_alive(record):
+                return True
+            time.sleep(0.1)
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        for _ in range(50):
+            if not self.is_alive(record):
+                return True
+            time.sleep(0.1)
+        return False
+
+
+def _run_tunnel_worker(args: argparse.Namespace) -> int:
+    if args.host != ALLOWED_HOST:
+        raise ExpctlError("tunnel host is not allowlisted")
+    if args.remote_port != MLFLOW_UI_PORT:
+        raise ExpctlError("remote tunnel port is not allowlisted")
+    if not 1024 <= args.local_port <= 65535:
+        raise ExpctlError("local tunnel port must be between 1024 and 65535")
+    if not 1 <= args.duration_seconds <= MAX_TUNNEL_SECONDS:
+        raise ExpctlError("tunnel duration is outside the allowlist")
+    if not re.fullmatch(r"[0-9a-f]{32}", args.token):
+        raise ExpctlError("tunnel token is invalid")
+    command = [
+        "ssh",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-N",
+        "-L",
+        f"127.0.0.1:{args.local_port}:127.0.0.1:{args.remote_port}",
+        ALLOWED_HOST,
+    ]
+    process = subprocess.Popen(command)
+    try:
+        return process.wait(timeout=args.duration_seconds)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        return 0
+
+
 class ExperimentController:
-    def __init__(self, state_root: Path | None = None, transport: Any | None = None):
+    def __init__(
+        self,
+        state_root: Path | None = None,
+        transport: Any | None = None,
+        tunnel_manager: Any | None = None,
+    ):
         self.state_root = Path(
             state_root
             or os.environ.get("EXPCTL_STATE_ROOT", "~/.local/state/dscnet/expctl")
         ).expanduser()
         self.transport = transport or SubprocessTransport()
+        self.tunnel_manager = tunnel_manager or LocalTunnelManager()
 
     def _load_config(self, experiment: str | Path, extra: Sequence[str] = ()):
         name = _experiment_name(experiment)
@@ -801,6 +958,236 @@ exit "$finalize_status"
             _atomic_json(local_control / "run-manifest.json", staged)
             return staged
 
+    def _ui_config(self):
+        config, _ = load_experiment_config(overrides=["runtime=slurm"])
+        _policy(config)
+        ui = config.runtime.mlflow.ui
+        if not ui.enabled:
+            raise ExpctlError("MLflow UI is disabled")
+        if ui.location != "login":
+            raise ExpctlError("only the allowlisted login-node MLflow UI is supported")
+        if not 1 <= ui.timeout_minutes <= MAX_UI_TIMEOUT_MINUTES:
+            raise ExpctlError("MLflow UI timeout is outside the allowlist")
+        if config.runtime.mlflow.tracking_uri != (
+            "sqlite:////home/a/andrewsq/data/urop/experiments/mlflow.db"
+        ):
+            raise ExpctlError("MLflow tracking URI is not allowlisted")
+        if Path(config.runtime.mlflow.artifact_root) != Path(
+            "/home/a/andrewsq/data/urop/experiments/mlflow-artifacts"
+        ):
+            raise ExpctlError("MLflow artifact root is not allowlisted")
+        return config
+
+    def _remote_ui(self, command: str, config: Any) -> dict[str, Any]:
+        helper = f"{ALLOWED_REMOTE_CHECKOUT}/tools/expctl_remote.py"
+        argv = [
+            "python3",
+            helper,
+            f"ui-{command}",
+            "--experiment-root",
+            ALLOWED_REMOTE_ROOT,
+        ]
+        if command == "start":
+            argv.extend(
+                [
+                    "--tracking-uri",
+                    config.runtime.mlflow.tracking_uri,
+                    "--artifact-root",
+                    config.runtime.mlflow.artifact_root,
+                    "--python",
+                    config.runtime.slurm.python_path,
+                    "--port",
+                    str(MLFLOW_UI_PORT),
+                    "--timeout-minutes",
+                    str(config.runtime.mlflow.ui.timeout_minutes),
+                ]
+            )
+        output = _checked(
+            self.transport.ssh(ALLOWED_HOST, argv), f"remote MLflow UI {command}"
+        )
+        try:
+            record = json.loads(output)
+        except json.JSONDecodeError as error:
+            raise ExpctlError("remote MLflow UI returned invalid JSON") from error
+        if not isinstance(record, dict) or record.get("state") not in {
+            "running",
+            "off",
+        }:
+            raise ExpctlError("remote MLflow UI returned an invalid state")
+        if command == "start" and (
+            record.get("authentication") != "basic"
+            or record.get("username") != "dscnet-ui"
+            or not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", record.get("password", ""))
+        ):
+            raise ExpctlError("remote MLflow UI returned invalid authentication details")
+        return record
+
+    def _local_ui_record(self) -> dict[str, Any] | None:
+        path = self.state_root / "ui.json"
+        if not path.is_file():
+            return None
+        try:
+            record = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            path.unlink(missing_ok=True)
+            return None
+        if not isinstance(record, dict):
+            path.unlink(missing_ok=True)
+            return None
+        return record
+
+    @staticmethod
+    def _remote_ui_deadline(remote: dict[str, Any], timeout_minutes: int) -> float:
+        deadline = remote.get("deadline_epoch")
+        now = time.time()
+        if (
+            not isinstance(deadline, (int, float))
+            or not math.isfinite(deadline)
+            or deadline <= now
+            or deadline > now + timeout_minutes * 60 + 30
+        ):
+            raise ExpctlError("remote MLflow UI returned an invalid deadline")
+        return float(deadline)
+
+    def ui_start(self, local_port: int = MLFLOW_UI_PORT) -> dict[str, Any]:
+        if not 1024 <= local_port <= 65535:
+            raise ExpctlError("local UI port must be between 1024 and 65535")
+        config = self._ui_config()
+        self.state_root.mkdir(parents=True, exist_ok=True)
+        with (self.state_root / "ui.lock").open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            remote = self._remote_ui("start", config)
+            try:
+                deadline = self._remote_ui_deadline(
+                    remote, config.runtime.mlflow.ui.timeout_minutes
+                )
+            except Exception:
+                if remote.get("started"):
+                    self._remote_ui("stop", config)
+                raise
+            local = self._local_ui_record()
+            if local and self.tunnel_manager.is_alive(local):
+                local_deadline = local.get("tunnel_deadline_epoch", 0)
+                same_lifetime = (
+                    isinstance(local_deadline, (int, float))
+                    and abs(local_deadline - deadline) <= 2
+                )
+                if local.get("local_port") == local_port and same_lifetime:
+                    return {
+                        "state": "running",
+                        "url": f"http://127.0.0.1:{local_port}",
+                        "local_port": local_port,
+                        "remote_deadline_epoch": deadline,
+                        "authentication": "basic",
+                        "username": remote["username"],
+                        "password": remote["password"],
+                    }
+                if not self.tunnel_manager.stop(local):
+                    if remote.get("started"):
+                        self._remote_ui("stop", config)
+                    raise ExpctlError("existing SSH tunnel did not stop")
+            (self.state_root / "ui.json").unlink(missing_ok=True)
+            tunnel = None
+            try:
+                remaining_seconds = deadline - time.time()
+                if remaining_seconds < 1:
+                    raise ExpctlError("remote MLflow UI is too close to its timeout")
+                duration_seconds = int(remaining_seconds)
+                tunnel = self.tunnel_manager.start(
+                    self.state_root,
+                    local_port,
+                    MLFLOW_UI_PORT,
+                    duration_seconds,
+                )
+                local_record = {
+                    **tunnel,
+                    "schema_version": 1,
+                    "remote_deadline_epoch": deadline,
+                    "tunnel_deadline_epoch": deadline,
+                }
+                _atomic_json(self.state_root / "ui.json", local_record)
+            except Exception as error:
+                tunnel_cleanup_failed = bool(
+                    tunnel and not self.tunnel_manager.stop(tunnel)
+                )
+                if remote.get("started"):
+                    self._remote_ui("stop", config)
+                if tunnel_cleanup_failed:
+                    raise ExpctlError(
+                        "SSH tunnel state write failed and the tunnel did not stop"
+                    ) from error
+                raise
+            return {
+                "state": "running",
+                "url": f"http://127.0.0.1:{local_port}",
+                "local_port": local_port,
+                "remote_deadline_epoch": deadline,
+                "authentication": "basic",
+                "username": remote["username"],
+                "password": remote["password"],
+            }
+
+    def ui_status(self) -> dict[str, Any]:
+        config = self._ui_config()
+        self.state_root.mkdir(parents=True, exist_ok=True)
+        with (self.state_root / "ui.lock").open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            remote = self._remote_ui("status", config)
+            local = self._local_ui_record()
+            local_deadline = local.get("tunnel_deadline_epoch", 0) if local else 0
+            local_valid = (
+                isinstance(local_deadline, (int, float))
+                and math.isfinite(local_deadline)
+                and local_deadline > time.time()
+                and isinstance(local.get("local_port"), int)
+                and 1024 <= local["local_port"] <= 65535
+            ) if local else False
+            tunnel_running = bool(
+                local_valid and local and self.tunnel_manager.is_alive(local)
+            )
+            if remote["state"] == "off":
+                if tunnel_running and not self.tunnel_manager.stop(local):
+                    raise ExpctlError("SSH tunnel did not stop")
+                (self.state_root / "ui.json").unlink(missing_ok=True)
+                return {"state": "off", "remote": remote}
+            deadline = self._remote_ui_deadline(
+                remote, config.runtime.mlflow.ui.timeout_minutes
+            )
+            if not tunnel_running:
+                if (
+                    local
+                    and self.tunnel_manager.is_alive(local)
+                    and not self.tunnel_manager.stop(local)
+                ):
+                    raise ExpctlError("expired SSH tunnel did not stop")
+                (self.state_root / "ui.json").unlink(missing_ok=True)
+                return {"state": "remote_only", "remote": remote}
+            local_port = local["local_port"]
+            return {
+                "state": "running",
+                "url": f"http://127.0.0.1:{local_port}",
+                "local_port": local_port,
+                "remote_deadline_epoch": deadline,
+            }
+
+    def ui_stop(self) -> dict[str, Any]:
+        config = self._ui_config()
+        self.state_root.mkdir(parents=True, exist_ok=True)
+        with (self.state_root / "ui.lock").open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            local = self._local_ui_record()
+            tunnel_was_running = bool(local and self.tunnel_manager.is_alive(local))
+            tunnel_stopped = bool(local and self.tunnel_manager.stop(local))
+            if tunnel_was_running and not tunnel_stopped:
+                raise ExpctlError("SSH tunnel did not stop")
+            (self.state_root / "ui.json").unlink(missing_ok=True)
+            remote = self._remote_ui("stop", config)
+            return {
+                "state": "off",
+                "tunnel_stopped": tunnel_stopped,
+                "remote": remote,
+            }
+
     def _record(self, run_id: str) -> tuple[Path, dict[str, Any]]:
         if not RUN_ID.fullmatch(run_id):
             raise ExpctlError("invalid run ID")
@@ -991,10 +1378,33 @@ def build_parser() -> argparse.ArgumentParser:
     log_parser = subparsers.add_parser("logs")
     log_parser.add_argument("run_id")
     log_parser.add_argument("--lines", type=int, default=200)
+    ui_parser = subparsers.add_parser("ui")
+    ui_subparsers = ui_parser.add_subparsers(dest="ui_command", required=True)
+    ui_start_parser = ui_subparsers.add_parser("start")
+    ui_start_parser.add_argument("--local-port", type=int, default=MLFLOW_UI_PORT)
+    ui_subparsers.add_parser("status")
+    ui_subparsers.add_parser("stop")
+    return parser
+
+
+def _tunnel_worker_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("_worker")
+    parser.add_argument("--host", required=True)
+    parser.add_argument("--local-port", required=True, type=int)
+    parser.add_argument("--remote-port", required=True, type=int)
+    parser.add_argument("--duration-seconds", required=True, type=int)
+    parser.add_argument("--token", required=True)
     return parser
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["_ui-tunnel"]:
+        try:
+            return _run_tunnel_worker(_tunnel_worker_parser().parse_args())
+        except Exception as error:
+            print(_bounded_detail(str(error)), file=sys.stderr)
+            return 1
     args = build_parser().parse_args()
     controller = ExperimentController(args.state_root)
     try:
@@ -1004,6 +1414,11 @@ def main() -> int:
             result = controller.submit(args.experiment, args.set, args.retry)
         elif args.command == "logs":
             result = controller.logs(args.run_id, args.lines)
+        elif args.command == "ui":
+            if args.ui_command == "start":
+                result = controller.ui_start(args.local_port)
+            else:
+                result = getattr(controller, f"ui_{args.ui_command}")()
         else:
             result = getattr(controller, args.command)(args.run_id)
     except Exception as error:

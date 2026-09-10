@@ -247,6 +247,8 @@ def validate_config(config: ExperimentConfig) -> ExperimentConfig:
         raise ValueError("the initial SQLite backend permits one concurrent run")
     if config.runtime.mlflow.ui.location not in {"login", "slurm"}:
         raise ValueError("mlflow.ui.location must be login or slurm")
+    if not 1 <= config.runtime.mlflow.ui.timeout_minutes <= 480:
+        raise ValueError("mlflow.ui.timeout_minutes must be between 1 and 480")
     if config.runtime.formal and config.runtime.allow_dirty:
         raise ValueError("formal runs cannot allow a dirty source tree")
     return config

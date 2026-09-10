@@ -4,12 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
+import secrets
+import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -19,6 +24,13 @@ JOB_ID = re.compile(r"^(\d+)(?:;[A-Za-z0-9_.-]+)?$")
 MAX_ARTIFACT_MANIFEST_BYTES = 1024 * 1024
 MAX_AUTO_FILE_BYTES = 8 * 1024**3
 MAX_AUTO_TOTAL_BYTES = 12 * 1024**3
+ALLOWED_EXPERIMENT_ROOT = Path("/home/a/andrewsq/data/urop/experiments")
+ALLOWED_MLFLOW_URI = "sqlite:////home/a/andrewsq/data/urop/experiments/mlflow.db"
+ALLOWED_ARTIFACT_ROOT = Path("/home/a/andrewsq/data/urop/experiments/mlflow-artifacts")
+ALLOWED_PYTHON = Path("/home/a/andrewsq/dev/urop/dscnet/DSCNetEnv/bin/python")
+MLFLOW_UI_PORT = 5000
+MAX_UI_TIMEOUT_MINUTES = 480
+MLFLOW_UI_USERNAME = "dscnet-ui"
 
 
 def _job_id(value: str) -> str:
@@ -307,6 +319,348 @@ def cancel(args: argparse.Namespace) -> dict:
     return {"job_id": args.job_id, "status": "cancellation_requested"}
 
 
+def _ui_paths(root: Path) -> tuple[Path, Path]:
+    root = root.resolve()
+    if root != ALLOWED_EXPERIMENT_ROOT:
+        raise RuntimeError("MLflow UI root is not allowlisted")
+    control = root / "control"
+    return control / "mlflow-ui.json", control / "mlflow-ui.log"
+
+
+def _ui_auth(control: Path) -> tuple[Path, str, str]:
+    control.mkdir(parents=True, exist_ok=True)
+    control.chmod(0o700)
+    config_path = control / "mlflow-auth.ini"
+    auth_database = control / "mlflow-auth.db"
+    secret_path = control / "mlflow-auth.secret"
+    password = ""
+    if config_path.is_file() and not config_path.is_symlink():
+        parser = configparser.ConfigParser()
+        parser.read(config_path)
+        if (
+            parser.get("mlflow", "admin_username", fallback="") != MLFLOW_UI_USERNAME
+            or parser.get("mlflow", "database_uri", fallback="")
+            != f"sqlite:///{auth_database}"
+            or parser.get("mlflow", "default_permission", fallback="")
+            != "NO_PERMISSIONS"
+        ):
+            raise RuntimeError("MLflow UI authentication config is invalid")
+        password = parser.get("mlflow", "admin_password", fallback="")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", password):
+            raise RuntimeError("MLflow UI authentication credential is invalid")
+        config_path.chmod(0o600)
+    elif config_path.exists():
+        raise RuntimeError("MLflow UI authentication config path is unsafe")
+    else:
+        password = secrets.token_urlsafe(32)
+        content = "\n".join(
+            [
+                "[mlflow]",
+                "default_permission = NO_PERMISSIONS",
+                f"database_uri = sqlite:///{auth_database}",
+                f"admin_username = {MLFLOW_UI_USERNAME}",
+                f"admin_password = {password}",
+                "authorization_function = mlflow.server.auth:authenticate_request_basic_auth",
+                "grant_default_workspace_access = false",
+                "",
+            ]
+        )
+        descriptor = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(content)
+    if auth_database.is_symlink() or (
+        auth_database.exists() and not auth_database.is_file()
+    ):
+        raise RuntimeError("MLflow UI authentication database path is unsafe")
+    auth_database.touch(mode=0o600, exist_ok=True)
+    auth_database.chmod(0o600)
+    if secret_path.is_file() and not secret_path.is_symlink():
+        secret = secret_path.read_text().strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{60,96}", secret):
+            raise RuntimeError("MLflow UI CSRF secret is invalid")
+        secret_path.chmod(0o600)
+    elif secret_path.exists():
+        raise RuntimeError("MLflow UI CSRF secret path is unsafe")
+    else:
+        secret = secrets.token_urlsafe(48)
+        descriptor = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(secret + "\n")
+    return config_path, password, secret
+
+
+def _linux_process_identity(pid: int) -> tuple[str, str] | None:
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        stat_fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return boot_id, stat_fields[19]
+    except (FileNotFoundError, IndexError, PermissionError, ProcessLookupError):
+        return None
+
+
+def _valid_ui_record(record) -> bool:
+    return (
+        isinstance(record, dict)
+        and record.get("schema_version") == 1
+        and isinstance(record.get("pid"), int)
+        and record["pid"] > 1
+        and isinstance(record.get("boot_id"), str)
+        and isinstance(record.get("process_start_ticks"), str)
+        and record.get("bind_host") == "127.0.0.1"
+        and record.get("port") == MLFLOW_UI_PORT
+        and record.get("tracking_uri") == ALLOWED_MLFLOW_URI
+        and record.get("artifact_root") == str(ALLOWED_ARTIFACT_ROOT)
+        and record.get("authentication") == "basic"
+        and isinstance(record.get("started_epoch"), (int, float))
+        and isinstance(record.get("deadline_epoch"), (int, float))
+        and math.isfinite(record["started_epoch"])
+        and math.isfinite(record["deadline_epoch"])
+        and record["deadline_epoch"] >= record["started_epoch"]
+    )
+
+
+def _ui_process_matches(record: dict) -> bool:
+    if not _valid_ui_record(record):
+        return False
+    pid = record.get("pid")
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    identity = _linux_process_identity(pid)
+    return identity == (record.get("boot_id"), record.get("process_start_ticks"))
+
+
+def _process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _stop_started_ui_process_group(record: dict) -> bool:
+    process_group = record["pid"]
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    for _ in range(50):
+        if not _process_group_exists(process_group):
+            return True
+        time.sleep(0.1)
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    for _ in range(50):
+        if not _process_group_exists(process_group):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _stop_ui_process(record: dict) -> bool:
+    if not _valid_ui_record(record):
+        return False
+    identity = _linux_process_identity(record["pid"])
+    if identity is None:
+        return True
+    if identity != (record["boot_id"], record["process_start_ticks"]):
+        return False
+    return _stop_started_ui_process_group(record)
+
+
+def _ui_port_is_open() -> bool:
+    with socket.socket() as probe:
+        probe.settimeout(0.2)
+        return probe.connect_ex(("127.0.0.1", MLFLOW_UI_PORT)) == 0
+
+
+def _ui_status_record(state_path: Path) -> dict:
+    if not state_path.is_file():
+        return {"state": "off"}
+    try:
+        record = json.loads(state_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        state_path.unlink(missing_ok=True)
+        if _ui_port_is_open():
+            raise RuntimeError("MLflow UI state is invalid while its port is in use")
+        return {"state": "off", "reason": "invalid_state"}
+    if not _valid_ui_record(record):
+        state_path.unlink(missing_ok=True)
+        if _ui_port_is_open():
+            raise RuntimeError("MLflow UI state is invalid while its port is in use")
+        return {"state": "off", "reason": "invalid_state"}
+    if not _ui_process_matches(record):
+        state_path.unlink(missing_ok=True)
+        return {"state": "off", "reason": "process_exited"}
+    if time.time() >= record["deadline_epoch"]:
+        if not _stop_ui_process(record):
+            raise RuntimeError("timed-out MLflow UI process did not stop")
+        state_path.unlink(missing_ok=True)
+        return {"state": "off", "reason": "timeout"}
+    return {**record, "state": "running"}
+
+
+def _ui_start(args: argparse.Namespace) -> dict:
+    state_path, log_path = _ui_paths(Path(args.experiment_root))
+    if args.tracking_uri != ALLOWED_MLFLOW_URI:
+        raise RuntimeError("MLflow tracking URI is not allowlisted")
+    if Path(args.artifact_root).resolve() != ALLOWED_ARTIFACT_ROOT:
+        raise RuntimeError("MLflow artifact root is not allowlisted")
+    if Path(args.python) != ALLOWED_PYTHON:
+        raise RuntimeError("MLflow Python path is not allowlisted")
+    if args.port != MLFLOW_UI_PORT:
+        raise RuntimeError("MLflow UI port is not allowlisted")
+    if not 1 <= args.timeout_minutes <= MAX_UI_TIMEOUT_MINUTES:
+        raise RuntimeError("MLflow UI timeout is outside the allowlist")
+    auth_config, password, csrf_secret = _ui_auth(state_path.parent)
+    current = _ui_status_record(state_path)
+    if current["state"] == "running":
+        return {
+            **current,
+            "started": False,
+            "authentication": "basic",
+            "username": MLFLOW_UI_USERNAME,
+            "password": password,
+        }
+    with socket.socket() as probe:
+        probe.settimeout(0.2)
+        if probe.connect_ex(("127.0.0.1", args.port)) == 0:
+            raise RuntimeError("MLflow UI port is already in use")
+    ALLOWED_ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
+    command = [
+        "/usr/bin/timeout",
+        "--signal=TERM",
+        "--kill-after=10s",
+        f"{args.timeout_minutes}m",
+        str(ALLOWED_PYTHON),
+        "-m",
+        "mlflow",
+        "ui",
+        "--app-name",
+        "basic-auth",
+        "--backend-store-uri",
+        ALLOWED_MLFLOW_URI,
+        "--default-artifact-root",
+        ALLOWED_ARTIFACT_ROOT.as_uri(),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(args.port),
+        "--workers",
+        "1",
+    ]
+    with log_path.open("ab") as log:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env={
+                **os.environ,
+                "MLFLOW_AUTH_CONFIG_PATH": str(auth_config),
+                "MLFLOW_FLASK_SERVER_SECRET_KEY": csrf_secret,
+            },
+        )
+    identity = None
+    for _ in range(50):
+        identity = _linux_process_identity(process.pid)
+        if identity is not None:
+            break
+        if process.poll() is not None:
+            break
+        time.sleep(0.1)
+    if identity is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+        raise RuntimeError("MLflow UI process did not start")
+    now = time.time()
+    record = {
+        "schema_version": 1,
+        "pid": process.pid,
+        "boot_id": identity[0],
+        "process_start_ticks": identity[1],
+        "bind_host": "127.0.0.1",
+        "port": args.port,
+        "tracking_uri": ALLOWED_MLFLOW_URI,
+        "artifact_root": str(ALLOWED_ARTIFACT_ROOT),
+        "authentication": "basic",
+        "started_epoch": now,
+        "deadline_epoch": now + args.timeout_minutes * 60,
+    }
+    try:
+        _atomic_json(state_path, record)
+    except Exception as error:
+        if not _stop_ui_process(record):
+            raise RuntimeError(
+                "MLflow UI state write failed and the process did not stop"
+            ) from error
+        raise
+    for _ in range(150):
+        if process.poll() is not None:
+            if not _stop_started_ui_process_group(record):
+                raise RuntimeError("failed MLflow UI left a process group running")
+            state_path.unlink(missing_ok=True)
+            raise RuntimeError("MLflow UI exited before becoming ready")
+        with socket.socket() as probe:
+            probe.settimeout(0.1)
+            if probe.connect_ex(("127.0.0.1", args.port)) == 0:
+                return {
+                    **record,
+                    "state": "running",
+                    "started": True,
+                    "username": MLFLOW_UI_USERNAME,
+                    "password": password,
+                }
+        time.sleep(0.1)
+    if not _stop_ui_process(record):
+        raise RuntimeError("unready MLflow UI process did not stop")
+    state_path.unlink(missing_ok=True)
+    raise RuntimeError("MLflow UI did not become ready")
+
+
+def _ui_status(args: argparse.Namespace) -> dict:
+    state_path, _ = _ui_paths(Path(args.experiment_root))
+    return _ui_status_record(state_path)
+
+
+def _ui_stop(args: argparse.Namespace) -> dict:
+    state_path, _ = _ui_paths(Path(args.experiment_root))
+    current = _ui_status_record(state_path)
+    stopped = current["state"] == "running" and _stop_ui_process(current)
+    if current["state"] == "running" and not stopped:
+        raise RuntimeError("MLflow UI process did not stop")
+    state_path.unlink(missing_ok=True)
+    return {"state": "off", "stopped": stopped}
+
+
+def _with_ui_lock(args: argparse.Namespace, operation) -> dict:
+    state_path, _ = _ui_paths(Path(args.experiment_root))
+    lock_path = state_path.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return operation(args)
+
+
+def ui_start(args: argparse.Namespace) -> dict:
+    return _with_ui_lock(args, _ui_start)
+
+
+def ui_status(args: argparse.Namespace) -> dict:
+    return _with_ui_lock(args, _ui_status)
+
+
+def ui_stop(args: argparse.Namespace) -> dict:
+    return _with_ui_lock(args, _ui_stop)
+
+
 MAX_LOG_FILES = 16
 MAX_LOG_BYTES = 48 * 1024
 
@@ -440,6 +794,16 @@ def build_parser() -> argparse.ArgumentParser:
     log_parser = subparsers.add_parser("logs")
     log_parser.add_argument("--run-dir", required=True)
     log_parser.add_argument("--lines", type=int, default=200, choices=range(1, 1001))
+    ui_start_parser = subparsers.add_parser("ui-start")
+    ui_start_parser.add_argument("--experiment-root", required=True)
+    ui_start_parser.add_argument("--tracking-uri", required=True)
+    ui_start_parser.add_argument("--artifact-root", required=True)
+    ui_start_parser.add_argument("--python", required=True)
+    ui_start_parser.add_argument("--port", required=True, type=int)
+    ui_start_parser.add_argument("--timeout-minutes", required=True, type=int)
+    for name in ("ui-status", "ui-stop"):
+        child = subparsers.add_parser(name)
+        child.add_argument("--experiment-root", required=True)
     artifact_check = subparsers.add_parser("verify-artifacts")
     artifact_check.add_argument("--run-dir", required=True)
     final = subparsers.add_parser("finalize")
@@ -457,6 +821,9 @@ def main() -> int:
         "status": status,
         "cancel": cancel,
         "logs": logs,
+        "ui-start": ui_start,
+        "ui-status": ui_status,
+        "ui-stop": ui_stop,
         "verify-artifacts": verify_artifacts,
         "finalize": finalize,
     }

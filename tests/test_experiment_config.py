@@ -56,6 +56,26 @@ class ExperimentConfigTests(unittest.TestCase):
                 overrides=["runtime.formal=true", "runtime.allow_dirty=true"]
             )
 
+    def test_mlflow_ui_location_and_timeout_are_bounded(self):
+        for location in ("login", "slurm"):
+            config, _ = load_experiment_config(
+                overrides=[f"runtime.mlflow.ui.location={location}"]
+            )
+            self.assertEqual(config.runtime.mlflow.ui.location, location)
+        with self.assertRaisesRegex(ValueError, "location must be login or slurm"):
+            load_experiment_config(overrides=["runtime.mlflow.ui.location=public"])
+        for timeout in (1, 480):
+            config, _ = load_experiment_config(
+                overrides=[f"runtime.mlflow.ui.timeout_minutes={timeout}"]
+            )
+            self.assertEqual(config.runtime.mlflow.ui.timeout_minutes, timeout)
+        for timeout in (0, 481):
+            with self.subTest(timeout=timeout):
+                with self.assertRaisesRegex(ValueError, "timeout_minutes"):
+                    load_experiment_config(
+                        overrides=[f"runtime.mlflow.ui.timeout_minutes={timeout}"]
+                    )
+
     def test_named_optimized_experiment_composes(self):
         config, _ = load_experiment_config("experiment/dscnet_optimized")
         self.assertEqual(config.model.training_pipeline, "optimized")

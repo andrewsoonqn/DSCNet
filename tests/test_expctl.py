@@ -1,11 +1,14 @@
+import argparse
 import hashlib
 import json
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from omegaconf import OmegaConf
 
@@ -16,9 +19,11 @@ from expctl import (
     CommandResult,
     ExpctlError,
     ExperimentController,
+    LocalTunnelManager,
     SubprocessTransport,
     _bounded_detail,
     _execution_dirty_paths,
+    _run_tunnel_worker,
 )
 
 sys.path.insert(
@@ -43,6 +48,8 @@ class FakeTransport:
         self.submit_count = 0
         self.fail_submit = False
         self.remote_files = {}
+        self.remote_ui_running = False
+        self.remote_ui_deadline = None
 
     def ssh(self, host, argv):
         self.calls.append(("ssh", host, tuple(argv)))
@@ -54,6 +61,37 @@ class FakeTransport:
             return CommandResult(
                 0, str(len(self.remote_files["control/artifacts.json"])) + "\n"
             )
+        if "ui-start" in argv:
+            started = not self.remote_ui_running
+            self.remote_ui_running = True
+            if started:
+                self.remote_ui_deadline = time.time() + 3600
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "state": "running",
+                        "started": started,
+                        "deadline_epoch": self.remote_ui_deadline,
+                        "authentication": "basic",
+                        "username": "dscnet-ui",
+                        "password": "a" * 43,
+                    }
+                ),
+            )
+        if "ui-status" in argv:
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "state": "running" if self.remote_ui_running else "off",
+                        "deadline_epoch": self.remote_ui_deadline,
+                    }
+                ),
+            )
+        if "ui-stop" in argv:
+            self.remote_ui_running = False
+            return CommandResult(0, json.dumps({"state": "off", "stopped": True}))
         if "verify-data" in argv:
             return CommandResult(0, json.dumps({"status": "verified"}))
         if "submit" in argv:
@@ -111,16 +149,50 @@ class FakeTransport:
         return CommandResult(0)
 
 
+class FakeTunnelManager:
+    def __init__(self):
+        self.starts = []
+        self.stops = []
+        self.alive = False
+        self.fail_start = False
+        self.fail_stop = False
+
+    def start(self, state_root, local_port, remote_port, duration_seconds):
+        self.starts.append((state_root, local_port, remote_port, duration_seconds))
+        if self.fail_start:
+            raise ExpctlError("tunnel failed")
+        self.alive = True
+        return {
+            "tunnel_pid": 1234,
+            "tunnel_token": "a" * 32,
+            "local_port": local_port,
+            "remote_port": remote_port,
+        }
+
+    def is_alive(self, record):
+        return self.alive
+
+    def stop(self, record):
+        was_alive = self.alive
+        self.stops.append(record)
+        if self.fail_stop:
+            return False
+        self.alive = False
+        return was_alive
+
+
 class ExpctlControllerTests(unittest.TestCase):
     def setUp(self):
         account_patch = patch(
-            "expctl.TRUSTED_ACCOUNTS", frozenset({"test-account"})
+            "expctl.TRUSTED_ACCOUNTS", frozenset({"allusers", "test-account"})
         )
         account_patch.start()
         self.addCleanup(account_patch.stop)
 
-    def _controller(self, root, transport=None):
-        return ExperimentController(root, transport or FakeTransport())
+    def _controller(self, root, transport=None, tunnel_manager=None):
+        return ExperimentController(
+            root, transport or FakeTransport(), tunnel_manager=tunnel_manager
+        )
 
     def test_formal_dirty_check_ignores_only_non_execution_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -390,6 +462,146 @@ class ExpctlControllerTests(unittest.TestCase):
             path.write_text("not json")
             with self.assertRaisesRegex(ExpctlError, "manifest is invalid"):
                 controller.status(record["run_id"])
+
+    def test_ui_lifecycle_starts_only_one_bounded_localhost_tunnel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            tunnel = FakeTunnelManager()
+            root = Path(directory)
+            controller = self._controller(root, transport, tunnel)
+            started = controller.ui_start(5050)
+            repeated = controller.ui_start(5050)
+            status = controller.ui_status()
+            stopped = controller.ui_stop()
+        self.assertEqual(started["url"], "http://127.0.0.1:5050")
+        self.assertEqual(repeated, started)
+        self.assertEqual(status["state"], "running")
+        self.assertEqual(stopped["state"], "off")
+        self.assertEqual(len(tunnel.starts), 1)
+        self.assertEqual(tunnel.starts[0][1:3], (5050, 5000))
+        self.assertGreaterEqual(tunnel.starts[0][3], 3598)
+        self.assertLessEqual(tunnel.starts[0][3], 3600)
+        self.assertEqual(len(tunnel.stops), 1)
+        ui_calls = [call for call in transport.calls if "ui-" in " ".join(call[2])]
+        self.assertTrue(ui_calls)
+        self.assertTrue(all(call[1] == "xlogin1" for call in ui_calls))
+        self.assertTrue(
+            all("127.0.0.1" not in " ".join(call[2]) for call in ui_calls)
+        )
+
+    def test_ui_tunnel_failure_stops_only_a_new_remote_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            tunnel = FakeTunnelManager()
+            tunnel.fail_start = True
+            controller = self._controller(Path(directory), transport, tunnel)
+            with self.assertRaisesRegex(ExpctlError, "tunnel failed"):
+                controller.ui_start()
+        self.assertFalse(transport.remote_ui_running)
+        self.assertTrue(any("ui-stop" in call[2] for call in transport.calls))
+
+    def test_ui_state_write_failure_cleans_up_tunnel_and_new_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            tunnel = FakeTunnelManager()
+            controller = self._controller(Path(directory), transport, tunnel)
+            with patch("expctl._atomic_json", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    controller.ui_start()
+        self.assertFalse(tunnel.alive)
+        self.assertFalse(transport.remote_ui_running)
+        self.assertEqual(len(tunnel.stops), 1)
+
+    def test_ui_replaces_a_tunnel_with_the_wrong_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            transport.remote_ui_running = True
+            transport.remote_ui_deadline = time.time() + 30
+            tunnel = FakeTunnelManager()
+            tunnel.alive = True
+            root = Path(directory)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "ui.json").write_text(
+                json.dumps(
+                    {
+                        "tunnel_pid": 1234,
+                        "tunnel_token": "a" * 32,
+                        "local_port": 5000,
+                        "remote_port": 5000,
+                        "tunnel_deadline_epoch": time.time() + 5,
+                    }
+                )
+            )
+            controller = self._controller(root, transport, tunnel)
+            result = controller.ui_start()
+        self.assertEqual(result["state"], "running")
+        self.assertEqual(len(tunnel.stops), 1)
+        self.assertEqual(len(tunnel.starts), 1)
+        self.assertGreaterEqual(tunnel.starts[0][3], 28)
+        self.assertLessEqual(tunnel.starts[0][3], 30)
+
+    def test_failed_tunnel_replacement_stops_a_new_remote_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            tunnel = FakeTunnelManager()
+            tunnel.alive = True
+            tunnel.fail_stop = True
+            root = Path(directory)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "ui.json").write_text(
+                json.dumps(
+                    {
+                        "tunnel_pid": 1234,
+                        "tunnel_token": "a" * 32,
+                        "local_port": 5000,
+                        "remote_port": 5000,
+                        "tunnel_deadline_epoch": time.time() + 5,
+                    }
+                )
+            )
+            controller = self._controller(root, transport, tunnel)
+            with self.assertRaisesRegex(ExpctlError, "did not stop"):
+                controller.ui_start()
+        self.assertFalse(transport.remote_ui_running)
+        self.assertTrue(any("ui-stop" in call[2] for call in transport.calls))
+
+    def test_ui_status_reports_remote_reader_without_a_local_tunnel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            transport.remote_ui_running = True
+            transport.remote_ui_deadline = time.time() + 3600
+            tunnel = FakeTunnelManager()
+            controller = self._controller(Path(directory), transport, tunnel)
+            status = controller.ui_status()
+        self.assertEqual(status["state"], "remote_only")
+
+    def test_local_tunnel_stop_waits_and_escalates_before_success(self):
+        record = {"tunnel_pid": 1234, "tunnel_token": "a" * 32}
+        with patch(
+            "expctl._process_has_token", side_effect=[True] * 51 + [False]
+        ), patch("expctl.os.killpg") as kill, patch("expctl.time.sleep"):
+            self.assertTrue(LocalTunnelManager().stop(record))
+        self.assertEqual(
+            kill.call_args_list,
+            [call(1234, signal.SIGTERM), call(1234, signal.SIGKILL)],
+        )
+
+    def test_tunnel_worker_forwards_only_loopback_and_ends_on_timeout(self):
+        arguments = argparse.Namespace(
+            host="xlogin1",
+            local_port=5050,
+            remote_port=5000,
+            duration_seconds=60,
+            token="a" * 32,
+        )
+        process = Mock()
+        process.wait.side_effect = [subprocess.TimeoutExpired("ssh", 60), 0]
+        with patch("expctl.subprocess.Popen", return_value=process) as launch:
+            self.assertEqual(_run_tunnel_worker(arguments), 0)
+        command = launch.call_args.args[0]
+        self.assertIn("127.0.0.1:5050:127.0.0.1:5000", command)
+        self.assertIn("ExitOnForwardFailure=yes", command)
+        process.terminate.assert_called_once()
 
     def test_subprocess_transport_times_out_with_a_bounded_error(self):
         transport = SubprocessTransport()

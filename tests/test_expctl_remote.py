@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "tools"))
@@ -189,6 +189,209 @@ class ExpctlRemoteTests(unittest.TestCase):
                 )
             )
         self.assertEqual(result["dataset_digest"], expected)
+
+    def test_ui_start_is_localhost_only_bounded_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            artifact_root = root / "mlflow-artifacts"
+            python = root / "python"
+            process = Mock(pid=1234)
+            process.poll.return_value = None
+            probe = MagicMock()
+            probe.__enter__.return_value = probe
+            probe.connect_ex.side_effect = [1, 0]
+            arguments = argparse.Namespace(
+                experiment_root=str(root),
+                tracking_uri="sqlite:///test.db",
+                artifact_root=str(artifact_root),
+                python=str(python),
+                port=5000,
+                timeout_minutes=60,
+            )
+            with patch.multiple(
+                expctl_remote,
+                ALLOWED_EXPERIMENT_ROOT=root,
+                ALLOWED_MLFLOW_URI="sqlite:///test.db",
+                ALLOWED_ARTIFACT_ROOT=artifact_root,
+                ALLOWED_PYTHON=python,
+            ), patch("expctl_remote.socket.socket", return_value=probe), patch(
+                "expctl_remote.subprocess.Popen", return_value=process
+            ) as launch, patch(
+                "expctl_remote._linux_process_identity", return_value=("boot", "ticks")
+            ), patch(
+                "expctl_remote._ui_process_matches", return_value=True
+            ):
+                started = expctl_remote.ui_start(arguments)
+                repeated = expctl_remote.ui_start(arguments)
+            command = launch.call_args.args[0]
+        self.assertEqual(started["state"], "running")
+        self.assertEqual(repeated["pid"], started["pid"])
+        self.assertEqual(launch.call_count, 1)
+        self.assertIn("--host", command)
+        self.assertEqual(command[command.index("--host") + 1], "127.0.0.1")
+        self.assertEqual(command[command.index("--app-name") + 1], "basic-auth")
+        self.assertIn("MLFLOW_AUTH_CONFIG_PATH", launch.call_args.kwargs["env"])
+        self.assertIn("MLFLOW_FLASK_SERVER_SECRET_KEY", launch.call_args.kwargs["env"])
+        self.assertEqual(started["authentication"], "basic")
+        self.assertEqual(started["username"], "dscnet-ui")
+        self.assertRegex(started["password"], r"^[A-Za-z0-9_-]{40,64}$")
+        self.assertIn("60m", command)
+
+    def test_ui_auth_uses_private_persistent_random_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control = Path(directory) / "control"
+            config, password, secret = expctl_remote._ui_auth(control)
+            repeated_config, repeated_password, repeated_secret = expctl_remote._ui_auth(control)
+            config_mode = config.stat().st_mode & 0o777
+            control_mode = control.stat().st_mode & 0o777
+        self.assertEqual(config, repeated_config)
+        self.assertEqual(password, repeated_password)
+        self.assertNotEqual(password, "password1234")
+        self.assertEqual(secret, repeated_secret)
+        self.assertRegex(secret, r"^[A-Za-z0-9_-]{60,96}$")
+        self.assertEqual(config_mode, 0o600)
+        self.assertEqual(control_mode, 0o700)
+
+    def test_ui_auth_rejects_a_symlinked_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control = Path(directory) / "control"
+            control.mkdir()
+            target = Path(directory) / "outside.db"
+            target.write_text("outside")
+            (control / "mlflow-auth.db").symlink_to(target)
+            target.unlink()
+            with self.assertRaisesRegex(RuntimeError, "database path is unsafe"):
+                expctl_remote._ui_auth(control)
+
+    def test_ui_state_write_failure_stops_the_new_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            artifact_root = root / "mlflow-artifacts"
+            python = root / "python"
+            process = Mock(pid=1234)
+            process.poll.return_value = None
+            probe = MagicMock()
+            probe.__enter__.return_value = probe
+            probe.connect_ex.return_value = 1
+            arguments = argparse.Namespace(
+                experiment_root=str(root),
+                tracking_uri="sqlite:///test.db",
+                artifact_root=str(artifact_root),
+                python=str(python),
+                port=5000,
+                timeout_minutes=60,
+            )
+            with patch.multiple(
+                expctl_remote,
+                ALLOWED_EXPERIMENT_ROOT=root,
+                ALLOWED_MLFLOW_URI="sqlite:///test.db",
+                ALLOWED_ARTIFACT_ROOT=artifact_root,
+                ALLOWED_PYTHON=python,
+            ), patch("expctl_remote.socket.socket", return_value=probe), patch(
+                "expctl_remote.subprocess.Popen", return_value=process
+            ), patch(
+                "expctl_remote._linux_process_identity", return_value=("boot", "ticks")
+            ), patch(
+                "expctl_remote._atomic_json", side_effect=OSError("disk full")
+            ), patch(
+                "expctl_remote._stop_ui_process", return_value=True
+            ) as stop:
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    expctl_remote.ui_start(arguments)
+        stop.assert_called_once()
+
+    def test_ui_stop_waits_and_escalates_before_success(self):
+        record = {"pid": 1234, "boot_id": "boot", "process_start_ticks": "ticks"}
+        with patch("expctl_remote._valid_ui_record", return_value=True), patch(
+            "expctl_remote._linux_process_identity", return_value=("boot", "ticks")
+        ), patch(
+            "expctl_remote._process_group_exists", side_effect=[True] * 50 + [False]
+        ), patch("expctl_remote.os.killpg") as kill, patch(
+            "expctl_remote.time.sleep"
+        ):
+            self.assertTrue(expctl_remote._stop_ui_process(record))
+        self.assertEqual(
+            kill.call_args_list,
+            [
+                call(1234, expctl_remote.signal.SIGTERM),
+                call(1234, expctl_remote.signal.SIGKILL),
+            ],
+        )
+
+    def test_ui_timeout_stops_only_the_recorded_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state = root / "control" / "mlflow-ui.json"
+            state.parent.mkdir(parents=True)
+            state.write_text(
+                json.dumps(
+                    {
+                        "pid": 1234,
+                        "boot_id": "boot",
+                        "process_start_ticks": "ticks",
+                        "deadline_epoch": 0,
+                    }
+                )
+            )
+            with patch.object(expctl_remote, "ALLOWED_EXPERIMENT_ROOT", root), patch(
+                "expctl_remote._valid_ui_record", return_value=True
+            ), patch(
+                "expctl_remote._ui_process_matches", return_value=True
+            ), patch("expctl_remote._stop_ui_process", return_value=True) as stop:
+                result = expctl_remote.ui_status(
+                    argparse.Namespace(experiment_root=str(root))
+                )
+        self.assertEqual(result, {"state": "off", "reason": "timeout"})
+        stop.assert_called_once()
+        self.assertFalse(state.exists())
+
+    def test_ui_status_quarantines_malformed_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state = root / "control" / "mlflow-ui.json"
+            state.parent.mkdir(parents=True)
+            for malformed in ([], {"deadline_epoch": "later"}, "bad"):
+                state.write_text(json.dumps(malformed))
+                with self.subTest(malformed=malformed), patch.object(
+                    expctl_remote, "ALLOWED_EXPERIMENT_ROOT", root
+                ), patch("expctl_remote._ui_port_is_open", return_value=False):
+                    result = expctl_remote.ui_status(
+                        argparse.Namespace(experiment_root=str(root))
+                    )
+                    self.assertEqual(
+                        result, {"state": "off", "reason": "invalid_state"}
+                    )
+                    self.assertFalse(state.exists())
+
+    def test_ui_status_fails_closed_for_malformed_state_with_active_port(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state = root / "control" / "mlflow-ui.json"
+            state.parent.mkdir(parents=True)
+            state.write_text("{truncated")
+            with patch.object(
+                expctl_remote, "ALLOWED_EXPERIMENT_ROOT", root
+            ), patch("expctl_remote._ui_port_is_open", return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "port is in use"):
+                    expctl_remote.ui_status(
+                        argparse.Namespace(experiment_root=str(root))
+                    )
+
+    def test_ui_status_fails_closed_for_unreadable_state_with_active_port(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state = root / "control" / "mlflow-ui.json"
+            state.parent.mkdir(parents=True)
+            state.write_text("{}")
+            with patch.object(
+                expctl_remote, "ALLOWED_EXPERIMENT_ROOT", root
+            ), patch.object(Path, "read_text", side_effect=PermissionError), patch(
+                "expctl_remote._ui_port_is_open", return_value=True
+            ):
+                with self.assertRaisesRegex(RuntimeError, "port is in use"):
+                    expctl_remote.ui_status(
+                        argparse.Namespace(experiment_root=str(root))
+                    )
 
     def test_logs_bound_files_bytes_and_newline_free_lines(self):
         with tempfile.TemporaryDirectory() as directory:
