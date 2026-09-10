@@ -1,3 +1,4 @@
+import random
 import sys
 import tempfile
 import types
@@ -5,6 +6,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+import numpy as np
+import torch
 
 MODULE_DIR = (
     Path(__file__).parents[1]
@@ -44,6 +48,7 @@ class ActionDispatchTests(unittest.TestCase):
             if_retrain=True,
             seed=2026,
             deterministic=True,
+            config_digest="test-digest",
             **paths,
         )
 
@@ -52,6 +57,28 @@ class ActionDispatchTests(unittest.TestCase):
         pipeline.Train = Mock()
         pipeline.Evaluate = Mock()
         return pipeline
+
+    def test_same_seed_reproduces_the_deterministic_smoke_sequence(self):
+        def sample():
+            return (
+                random.random(),
+                np.random.random(),
+                torch.rand(4),
+            )
+
+        S0_Main.apply_reproducibility(2026, True)
+        first = sample()
+        S0_Main.apply_reproducibility(2026, True)
+        second = sample()
+        self.assertEqual(first[:2], second[:2])
+        torch.testing.assert_close(first[2], second[2], rtol=0, atol=0)
+
+    def test_process_rejects_configuration_without_a_hydra_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = self._prepared_args(Path(directory), "train")
+            del args.config_digest
+            with self.assertRaisesRegex(RuntimeError, "Hydra experiment digest"):
+                S0_Main.Process(args)
 
     def test_train_does_not_evaluate_test_set(self):
         with tempfile.TemporaryDirectory() as directory:

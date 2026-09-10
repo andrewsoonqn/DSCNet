@@ -252,6 +252,18 @@ class ExpctlControllerTests(unittest.TestCase):
                 _, _, _, digest = _control_evidence(resolved)
         self.assertEqual(digest, record["experiment_digest"])
 
+    def test_generated_job_uses_the_configuration_free_bootstrap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = self._controller(root)._stage(EXPERIMENT, OVERRIDES)
+            script = (
+                root / "runs" / record["run_id"] / "control" / "job.sbatch"
+            ).read_text()
+        self.assertIn("export DSCNET_RESOLVED_CONFIG=", script)
+        self.assertIn("export DSCNET_SOURCE_ROOT=", script)
+        self.assertIn("/run_models.sbatch", script)
+        self.assertNotIn("S0_Main.py", script)
+
     def test_resource_and_path_allowlists_fail_closed(self):
         cases = {
             "Slurm account": [*OVERRIDES, "runtime.slurm.account=untrusted"],
@@ -337,6 +349,52 @@ class ExpctlControllerTests(unittest.TestCase):
         self.assertNotEqual(first["run_id"], second["run_id"])
         self.assertNotEqual(
             first["normalization"]["sha256"], second["normalization"]["sha256"]
+        )
+
+    def test_resumed_training_stages_latest_checkpoint_in_a_new_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            weights = root / "weights"
+            weights.mkdir()
+            mean_std = root / "Mean_Std.npy"
+            mean_std.write_bytes(b"normalization")
+            common = [
+                *OVERRIDES,
+                "action=train",
+                f"data.Meanstd_path={mean_std}",
+                f"data.Dir_Weights={weights}",
+                "data.model_name=latest.ckpt",
+            ]
+            transport = FakeTransport()
+            controller = self._controller(root / "state", transport)
+            initial = controller.submit(EXPERIMENT, common)
+            (weights / "latest.ckpt").write_bytes(b"checkpoint-state")
+            resumed = controller.submit(
+                EXPERIMENT,
+                [*common, "training.if_retrain=false", "training.start_train_epoch=2"],
+                retry=True,
+            )
+            control = root / "state" / "runs" / resumed["run_id"] / "control"
+            resolved = OmegaConf.load(control / "resolved-config.yaml")
+            staged_checkpoint = (control / "training-checkpoint").read_bytes()
+            resumed_retrain = resolved.training.if_retrain
+            resumed_epoch = resolved.training.start_train_epoch
+
+        self.assertEqual(initial["experiment_digest"], resumed["experiment_digest"])
+        self.assertEqual(resumed["run_id"], initial["run_id"] + "-a2")
+        self.assertEqual(staged_checkpoint, b"checkpoint-state")
+        self.assertFalse(resumed_retrain)
+        self.assertEqual(resumed_epoch, 2)
+        self.assertEqual(
+            resumed["training_checkpoint"]["sha256"],
+            hashlib.sha256(b"checkpoint-state").hexdigest(),
+        )
+        commands = [call[2] for call in transport.calls if call[0] == "ssh"]
+        self.assertTrue(
+            any(
+                command[0] == "cp" and "training-checkpoint" in command[2]
+                for command in commands
+            )
         )
 
     def test_evaluation_stages_and_binds_an_explicit_checkpoint(self):
@@ -602,6 +660,26 @@ class ExpctlControllerTests(unittest.TestCase):
         self.assertIn("127.0.0.1:5050:127.0.0.1:5000", command)
         self.assertIn("ExitOnForwardFailure=yes", command)
         process.terminate.assert_called_once()
+
+    def test_rsync_commands_support_the_system_rsync(self):
+        transport = SubprocessTransport()
+        result = CommandResult(0)
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            transport, "_run", return_value=result
+        ) as run:
+            source = Path(directory) / "source"
+            source.write_text("data")
+            transport.sync_to([source], "xlogin1", "/remote/control")
+            transport.fetch_file(
+                "xlogin1", "/remote/file", Path(directory) / "file", 1024
+            )
+            transport.fetch_files(
+                "xlogin1", "/remote", ["control/file"], Path(directory) / "tree"
+            )
+        for invocation in run.call_args_list:
+            command = invocation.args[0]
+            self.assertEqual(command[:2], ["rsync", "-a"])
+            self.assertNotIn("--protect-args", command)
 
     def test_subprocess_transport_times_out_with_a_bounded_error(self):
         transport = SubprocessTransport()

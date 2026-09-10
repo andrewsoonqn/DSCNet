@@ -18,10 +18,9 @@ sys.path.insert(0, str(MODULE_DIR))
 
 import S0_Main
 from S4_Experiment_Config import (
-    legacy_default_differences,
     load_experiment_config,
     resolved_yaml,
-    to_legacy_namespace,
+    to_runtime_namespace,
 )
 
 
@@ -93,13 +92,10 @@ class ExperimentConfigTests(unittest.TestCase):
         self.assertIn("ROI_shape:", text)
         self.assertIn("seed: 2026", text)
         self.assertIn("deterministic: true", text)
-        args = to_legacy_namespace(config)
+        args = to_runtime_namespace(config)
         self.assertEqual(args.kernel_size, 5)
         self.assertEqual(args.seed, 2026)
         self.assertTrue(args.deterministic)
-
-    def test_hydra_and_argparse_defaults_remain_equivalent(self):
-        self.assertEqual(legacy_default_differences(), {})
 
     def test_invalid_training_schedule_fails(self):
         with self.assertRaisesRegex(ValueError, "start_train_epoch"):
@@ -112,6 +108,7 @@ class ExperimentConfigTests(unittest.TestCase):
             root = Path(directory)
             args = SimpleNamespace(
                 action="train",
+                config_digest="test-digest",
                 Meanstd_path=str(root / "missing-meanstd.npy"),
                 Image_Tr_txt=str(root / "missing-train-images.txt"),
                 Label_Tr_txt=str(root / "missing-train-labels.txt"),

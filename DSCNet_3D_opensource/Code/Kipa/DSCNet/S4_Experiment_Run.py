@@ -15,8 +15,9 @@ from omegaconf import OmegaConf
 from S0_Main import Process
 from S4_Experiment_Config import (
     ExperimentConfig,
+    identity_config_yaml as _identity_config_yaml,
     load_experiment_config,
-    to_legacy_namespace,
+    to_runtime_namespace,
     validate_config,
 )
 from S4_Experiment_Tracking import (
@@ -46,13 +47,6 @@ def _artifact_root(path: str, repo_root: Path) -> Path:
     return root if root.is_absolute() else repo_root / root
 
 
-def _identity_config_yaml(resolved) -> str:
-    identity = OmegaConf.create(OmegaConf.to_container(resolved, resolve=True))
-    identity.training.if_retrain = True
-    identity.training.start_train_epoch = 1
-    return OmegaConf.to_yaml(identity, resolve=True, sort_keys=True)
-
-
 def _dataset_manifest(config, args):
     if config.action == "prepare":
         data_root = Path(config.data.data_dir)
@@ -77,13 +71,17 @@ def _control_evidence(resolved) -> tuple[dict, dict, str, str]:
     environment = json.loads((control / "environment-lock.json").read_text())
     run_manifest = json.loads((control / "run-manifest.json").read_text())
     run_id = run_manifest["run_id"]
-    for key in ("normalization", "evaluation_checkpoint"):
+    for key in (
+        "normalization",
+        "evaluation_checkpoint",
+        "training_checkpoint",
+    ):
         evidence = run_manifest.get(key)
         if not evidence:
             continue
         path = (
             Path(resolved["data"]["Dir_Weights"]) / evidence["name"]
-            if key == "evaluation_checkpoint"
+            if key in {"evaluation_checkpoint", "training_checkpoint"}
             else control / evidence["name"]
         )
         if (
@@ -151,7 +149,7 @@ def _write_json_from_environment(variable: str, value: dict[str, Any]) -> None:
 
 
 def _execute(config, resolved, parent_run_id: str | None = None) -> dict[str, str]:
-    args = to_legacy_namespace(config)
+    args = to_runtime_namespace(config)
     if os.environ.get("DSCNET_CONTROL_DIR"):
         dataset_manifest, provenance, lock_identifier, digest = _control_evidence(resolved)
     else:

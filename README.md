@@ -108,7 +108,7 @@ Code Introduction: (The easiest way to run a code!)
     !!! If you want to change the dataset, you can change "DRIVE" to other task names
 """
 # Change the todo content and then run ...
-> python S0_Main.py
+> python S4_Experiment_Run.py --config-name experiment/dscnet_standard
 ```
 
 ### S3_DSConv

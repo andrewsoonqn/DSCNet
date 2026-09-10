@@ -12,7 +12,7 @@ MODULE_DIR = (
 )
 sys.path.insert(0, str(MODULE_DIR))
 
-from S0_Main import resolve_paths
+from S4_Experiment_Config import resolve_runtime_paths
 
 
 class PathResolutionTests(unittest.TestCase):
@@ -51,7 +51,7 @@ class PathResolutionTests(unittest.TestCase):
         return SimpleNamespace(**values)
 
     def test_root_and_data_paths_do_not_need_trailing_separators(self):
-        args = resolve_paths(self._args())
+        args = resolve_runtime_paths(self._args())
 
         self.assertEqual(args.Tr_Image_dir, "/tmp/minivess/train/image")
         self.assertEqual(args.Label_Te_txt, "/tmp/dscnet-root/Txt/Txt_trial/Label_Te.txt")
@@ -59,7 +59,7 @@ class PathResolutionTests(unittest.TestCase):
         self.assertEqual(args.save_path_max, "/tmp/dscnet-root/Results/trial/DSCNet_max")
 
     def test_explicit_paths_are_preserved(self):
-        args = resolve_paths(
+        args = resolve_runtime_paths(
             self._args(
                 Tr_Image_dir="/data/custom-images",
                 Dir_Txt="/runs/manifests",

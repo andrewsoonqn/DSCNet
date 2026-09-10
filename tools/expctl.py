@@ -33,9 +33,10 @@ sys.path.insert(0, str(CODE_DIR))
 from omegaconf import OmegaConf
 
 from S4_Experiment_Config import (
+    identity_config_yaml,
     load_experiment_config,
     resolved_yaml,
-    to_legacy_namespace,
+    to_runtime_namespace,
     validate_config,
 )
 from S4_Experiment_Tracking import build_dataset_manifest, collect_git_provenance, sha256_file
@@ -99,7 +100,7 @@ class SubprocessTransport:
 
     def sync_to(self, paths: Sequence[Path], host: str, remote_dir: str) -> CommandResult:
         return self._run(
-            ["rsync", "-a", "--protect-args", *map(str, paths), f"{host}:{remote_dir}/"],
+            ["rsync", "-a", *map(str, paths), f"{host}:{remote_dir}/"],
             TRANSFER_TIMEOUT_SECONDS,
         )
 
@@ -111,7 +112,6 @@ class SubprocessTransport:
             [
                 "rsync",
                 "-a",
-                "--protect-args",
                 f"--max-size={max_size}",
                 f"{host}:{remote_path}",
                 str(local_path),
@@ -131,7 +131,6 @@ class SubprocessTransport:
                 [
                     "rsync",
                     "-a",
-                    "--protect-args",
                     f"--files-from={files_from}",
                     f"--max-size={MAX_AUTO_FILE_BYTES}",
                     f"{host}:{remote_root}/",
@@ -556,7 +555,13 @@ class ExperimentController:
         _policy(typed)
         return name, typed, resolved
 
-    def _stage(self, experiment: str | Path, extra: Sequence[str] = ()) -> dict[str, Any]:
+    def _stage(
+        self,
+        experiment: str | Path,
+        extra: Sequence[str] = (),
+        *,
+        retry: bool = False,
+    ) -> dict[str, Any]:
         name, config, resolved = self._load_config(experiment, extra)
         provenance = _source_provenance(config.runtime.formal)
         full_dataset = build_dataset_manifest(config.data.data_dir)
@@ -576,7 +581,7 @@ class ExperimentController:
                 full_dataset,
                 "/home/a/andrewsq/data/urop/minivess-half",
             )
-            legacy_paths = to_legacy_namespace(config)
+            legacy_paths = to_runtime_namespace(config)
             normalization = None
             if config.action != "prepare":
                 mean_std = Path(legacy_paths.Meanstd_path)
@@ -593,25 +598,42 @@ class ExperimentController:
                     "size": mean_std.stat().st_size,
                 }
             evaluation_checkpoint = None
-            if config.action == "evaluate":
+            training_checkpoint = None
+            if config.action in {"train", "evaluate"}:
                 weights = Path(legacy_paths.Dir_Weights)
                 if not weights.is_absolute():
                     weights = REPO_ROOT / weights
-                candidates = [
-                    weights / legacy_paths.model_name_max,
-                    weights / legacy_paths.model_name,
-                ]
-                checkpoint = next((path for path in candidates if path.is_file()), None)
-                if checkpoint is None:
-                    raise ExpctlError(
-                        "evaluation requires an explicit best or latest checkpoint"
+                if config.action == "evaluate":
+                    candidates = [
+                        weights / legacy_paths.model_name_max,
+                        weights / legacy_paths.model_name,
+                    ]
+                    error = "evaluation requires an explicit best or latest checkpoint"
+                    staged_name = "evaluation-checkpoint"
+                elif not config.training.if_retrain:
+                    candidates = [weights / legacy_paths.model_name]
+                    error = "resumed training requires an explicit latest checkpoint"
+                    staged_name = "training-checkpoint"
+                else:
+                    candidates = []
+                    error = ""
+                    staged_name = ""
+                if candidates:
+                    checkpoint = next(
+                        (path for path in candidates if path.is_file()), None
                     )
-                shutil.copy2(checkpoint, pending_control / "evaluation-checkpoint")
-                evaluation_checkpoint = {
-                    "name": checkpoint.name,
-                    "sha256": sha256_file(checkpoint),
-                    "size": checkpoint.stat().st_size,
-                }
+                    if checkpoint is None:
+                        raise ExpctlError(error)
+                    shutil.copy2(checkpoint, pending_control / staged_name)
+                    evidence = {
+                        "name": checkpoint.name,
+                        "sha256": sha256_file(checkpoint),
+                        "size": checkpoint.stat().st_size,
+                    }
+                    if config.action == "evaluate":
+                        evaluation_checkpoint = evidence
+                    else:
+                        training_checkpoint = evidence
             remote_control_placeholder = str(remote_root / "runs" / "RUN_PLACEHOLDER" / "control")
             remote_outputs_placeholder = str(remote_root / "runs" / "RUN_PLACEHOLDER" / "outputs")
             OmegaConf.update(resolved, "data.data_dir", "/home/a/andrewsq/data/urop/minivess-half")
@@ -626,7 +648,8 @@ class ExperimentController:
             OmegaConf.update(resolved, "data.save_path", remote_outputs_placeholder + "/predictions/")
             OmegaConf.update(resolved, "data.save_path_max", remote_outputs_placeholder + "/predictions-best/")
             validate_config(OmegaConf.to_object(resolved))
-            identity_template = resolved_yaml(resolved)
+            execution_template = resolved_yaml(resolved)
+            identity_template = identity_config_yaml(resolved)
             identity_git = {
                 key: value for key, value in provenance.items() if key != "patch"
             }
@@ -642,13 +665,23 @@ class ExperimentController:
                     "controller_version": CONTROLLER_VERSION,
                 }
             )
-            run_id = digest[:16]
+            base_id = digest[:16]
+            if retry:
+                if not (self.state_root / "runs" / base_id).is_dir():
+                    raise ExpctlError("cannot retry before the initial attempt exists")
+                attempt = 2
+                while (self.state_root / "runs" / f"{base_id}-a{attempt}").exists():
+                    attempt += 1
+                run_id = f"{base_id}-a{attempt}"
+            else:
+                run_id = base_id
+                attempt = 1
             remote_run = str(remote_root / "runs" / run_id)
             run_dir = self.state_root / "runs" / run_id
             existing_manifest = run_dir / "control" / "run-manifest.json"
             if existing_manifest.is_file():
                 return self._record(run_id)[1]
-            resolved_text = identity_template.replace("RUN_PLACEHOLDER", run_id)
+            resolved_text = execution_template.replace("RUN_PLACEHOLDER", run_id)
             control = run_dir / "control"
             control.mkdir(parents=True, exist_ok=True)
             shutil.copy2(archive, control / "source.tar.gz")
@@ -674,7 +707,7 @@ class ExperimentController:
                 "controller_version": CONTROLLER_VERSION,
                 "pi_extension_version": PI_EXTENSION_VERSION,
                 "run_id": run_id,
-                "attempt": 1,
+                "attempt": attempt,
                 "experiment": name,
                 "action": config.action,
                 "experiment_digest": digest,
@@ -683,6 +716,7 @@ class ExperimentController:
                 "best_checkpoint_name": legacy_paths.model_name_max,
                 "normalization": normalization,
                 "evaluation_checkpoint": evaluation_checkpoint,
+                "training_checkpoint": training_checkpoint,
                 "archive_sha256": sha256_file(control / "source.tar.gz"),
                 "host": config.runtime.slurm.host,
                 "account": config.runtime.slurm.account,
@@ -703,12 +737,7 @@ class ExperimentController:
         outputs = f"{remote_run}/outputs"
         command = " ".join(
             shlex.quote(value)
-            for value in [
-                slurm.python_path,
-                f"{source}/DSCNet_3D_opensource/Code/Kipa/DSCNet/S4_Experiment_Run.py",
-                "--resolved-config",
-                f"{control}/resolved-config.yaml",
-            ]
+            for value in ["bash", f"{source}/run_models.sbatch"]
         )
         helper = f"{source}/tools/expctl_remote.py"
         return f"""#!/usr/bin/env bash
@@ -727,9 +756,12 @@ export DSCNET_CONTROL_DIR={shlex.quote(control)}
 export DSCNET_EXPERIMENT_DIGEST={shlex.quote(manifest['experiment_digest'])}
 export DSCNET_RUN_RESULT_PATH={shlex.quote(outputs + '/run-result.json')}
 export DSCNET_FINAL_METRICS_PATH={shlex.quote(outputs + '/final-metrics.json')}
+export DSCNET_PYTHON={shlex.quote(slurm.python_path)}
+export DSCNET_SOURCE_ROOT={shlex.quote(source)}
+export DSCNET_RESOLVED_CONFIG={shlex.quote(control + '/resolved-config.yaml')}
 {command} 2>&1 | tee {shlex.quote(remote_run + '/logs/pipeline.log')}
 pipeline_status=${{PIPESTATUS[0]}}
-{shlex.quote(slurm.python_path)} {shlex.quote(helper)} finalize --run-dir {shlex.quote(remote_run)} --best-checkpoint {shlex.quote(to_legacy_namespace(config).model_name_max)}
+{shlex.quote(slurm.python_path)} {shlex.quote(helper)} finalize --run-dir {shlex.quote(remote_run)} --best-checkpoint {shlex.quote(to_runtime_namespace(config).model_name_max)}
 finalize_status=$?
 if [[ "$pipeline_status" -ne 0 ]]; then
   exit "$pipeline_status"
@@ -750,39 +782,7 @@ exit "$finalize_status"
         lock_path = self.state_root / ".lock"
         with lock_path.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            staged = self._stage(experiment, extra)
-            base_id = staged["run_id"]
-            if retry:
-                attempt = 2
-                while (self.state_root / "runs" / f"{base_id}-a{attempt}").exists():
-                    attempt += 1
-                new_id = f"{base_id}-a{attempt}"
-                old = self.state_root / "runs" / base_id
-                new = self.state_root / "runs" / new_id
-                shutil.copytree(old, new)
-                staged = dict(staged)
-                staged["run_id"] = new_id
-                staged["attempt"] = attempt
-                staged["remote_run_dir"] = staged["remote_run_dir"].replace(base_id, new_id)
-                control = new / "control"
-                for name in (
-                    "resolved-config.yaml",
-                    "Image_Tr.txt",
-                    "Label_Tr.txt",
-                    "Image_Va.txt",
-                    "Label_Va.txt",
-                    "Image_Te.txt",
-                    "Label_Te.txt",
-                    "job.sbatch",
-                ):
-                    path = control / name
-                    if path.is_file():
-                        path.write_text(path.read_text().replace(base_id, new_id))
-                staged["job_id"] = None
-                staged["state"] = "staged"
-                staged.pop("last_status", None)
-                staged.pop("error", None)
-                _atomic_json(control / "run-manifest.json", staged)
+            staged = self._stage(experiment, extra, retry=retry)
             run_id = staged["run_id"]
             local_control = self.state_root / "runs" / run_id / "control"
             _, existing = self._record(run_id)
@@ -879,15 +879,22 @@ exit "$finalize_status"
                 ).split()[0]
                 if normalization_hash != normalization["sha256"]:
                     raise ExpctlError("remote normalization digest does not match")
-            checkpoint = staged.get("evaluation_checkpoint")
-            if checkpoint:
-                remote_checkpoint = f"{remote_run}/control/evaluation-checkpoint"
+            for key, staged_name, label in (
+                ("evaluation_checkpoint", "evaluation-checkpoint", "evaluation"),
+                ("training_checkpoint", "training-checkpoint", "training"),
+            ):
+                checkpoint = staged.get(key)
+                if not checkpoint:
+                    continue
+                remote_checkpoint = f"{remote_run}/control/{staged_name}"
                 checkpoint_hash = _checked(
                     self.transport.ssh(host, ["sha256sum", remote_checkpoint]),
-                    "remote evaluation-checkpoint verification",
+                    f"remote {label}-checkpoint verification",
                 ).split()[0]
                 if checkpoint_hash != checkpoint["sha256"]:
-                    raise ExpctlError("remote evaluation checkpoint digest does not match")
+                    raise ExpctlError(
+                        f"remote {label} checkpoint digest does not match"
+                    )
                 _checked(
                     self.transport.ssh(
                         host,
@@ -898,7 +905,7 @@ exit "$finalize_status"
                             f"{remote_run}/outputs/weights/{checkpoint['name']}",
                         ],
                     ),
-                    "evaluation-checkpoint staging",
+                    f"{label}-checkpoint staging",
                 )
             splits = ",".join(_action_splits(staged["action"]))
             _checked(

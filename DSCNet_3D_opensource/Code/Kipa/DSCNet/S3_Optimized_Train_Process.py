@@ -4,13 +4,13 @@ import torch
 import logging
 import numpy as np
 from os.path import join
+from pathlib import Path
 import SimpleITK as sitk
 from datetime import datetime
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import precision_score, recall_score, accuracy_score
 from torchinfo import summary
-from monai.data.utils import dense_patch_slices
 from monai.losses import DiceCELoss, DiceLoss
 
 from S3_Checkpoint import (
@@ -23,6 +23,7 @@ from S3_Dataloader import Dataloader
 from S3_Evaluation_Metrics import log_summary, summarize_predictions
 from S3_Loss import cross_loss, dice_cross_loss, entropy_regularization_cross_loss, entropy_loss
 from S3_Metrics import cldice_score, dice_score, to_minivess_binary_mask
+from S3_Sliding_Window import sliding_window_logits
 
 import warnings
 
@@ -309,297 +310,32 @@ def generate_map_kernel(ROI_shape):
 
 
 # new predict process
-def new_predict(model, image_dir, meanstd_path, save_path, args, device, map_kernel_tensor):
+def new_predict(
+    model, image_dir, meanstd_path, save_path, args, device, map_kernel_tensor
+):
+    """Run the shared edge-safe inference path for the optimized model."""
+    del map_kernel_tensor
     print("Predict test data")
-    model.eval()
- 
-    file = read_file_from_txt(image_dir)
-    file_num = len(file)
- 
-    stride = (args.ROI_shape[0] // 2, args.ROI_shape[1] // 2, args.ROI_shape[2] // 2)
-    map_kernel = map_kernel_tensor.data.cpu().numpy()
- 
-    for t in range(file_num):
-        image_path = file[t]
+    mean, std = np.load(meanstd_path)
+    if not np.isfinite(std) or std == 0:
+        raise ValueError("normalization standard deviation must be finite and non-zero")
+    for image_path in read_file_from_txt(image_dir):
         print(image_path)
-
-        # Load image and preserve SimpleITK metadata
-        image = sitk.ReadImage(image_path)
-        orig_spacing   = image.GetSpacing()
-        orig_origin    = image.GetOrigin()
-        orig_direction = image.GetDirection()
-        image = sitk.GetArrayFromImage(image).astype(np.float32)
- 
-        # Normalise
-        name = image_path[image_path.rfind("/") + 1:]
-        mean, std = np.load(meanstd_path)
-        image = (image - mean) / std
- 
-        # Pad if any dimension is smaller than ROI
-        z_old, y_old, x_old = image.shape
-        z = max(z_old, args.ROI_shape[0])
-        y = max(y_old, args.ROI_shape[1])
-        x = max(x_old, args.ROI_shape[2])
-
-        if (z, y, x) != (z_old, y_old, x_old):
-            image = reshape_img(image, z, y, x)
- 
-        # Accumulation buffers
-        predict = np.zeros([1, args.n_classes, z, y, x], dtype=np.float32)
-        n_map = np.zeros([1, args.n_classes, z, y, x], dtype=np.float32)
- 
-        # Add batch and channel dims for slicing (1, 1, Z, Y, X)
-        image = image[np.newaxis, np.newaxis, :, :, :]
- 
-        # Build snap-to-edge patch positions
-        slices = dense_patch_slices(image_size=(z, y, x), patch_size=args.ROI_shape, scan_interval=stride)
- 
-        # Inference loop
-        # with torch.no_grad():
-        #     for slice_z, slice_y, slice_x in slices:
-        #         patch = image[:, :, slice_z, slice_y, slice_x] # (1, 1, sz, sy, sx)
-        #         patch_tensor = torch.from_numpy(patch).to(device)
- 
-        #         output = model(patch_tensor) # (1, n_classes, sz, sy, sx)
-        #         output_weighted = (output * map_kernel_tensor).data.cpu().numpy()
- 
-        #         predict[:, :, slice_z, slice_y, slice_x] += output_weighted
-        #         n_map[:, :, slice_z, slice_y, slice_x] += map_kernel
-
-        # patches_size = 0
-        # patches = np.zeros([args.num_batch, args.n_channels, args.ROI_shape[0], args.ROI_shape[1], args.ROI_shape[2]])
-
-        # with torch.no_grad():
-        #     for slice_z, slice_y, slice_x in slices:
-        #         patch = image[:, :, slice_z, slice_y, slice_x] # (1, n_channels, sz, sy, sx)
-        #         patches[patches_size] = patch # (num_batch, n_channels, sz, sy, sx)
-        #         patches_size += 1
-        #         if patches_size == args.num_batch:
-        #             patches_tensor = torch.from_numpy(patches).to(device)
-        #             output = model(patches_tensor) # (num_batch, n_classes, sz, sy, sx)
-        #             output_weighted = (output * map_kernel_tensor).data.cpu().numpy() # (num_batch, n_classes, sz, sy, sx)
- 
-        #             predict[:, :, slice_z, slice_y, slice_x] += output_weighted
-        #             n_map[:, :, slice_z, slice_y, slice_x] += map_kernel
-
-        with torch.no_grad():
-            batch_patches = []   # accumulates patch tensors for current batch
-            batch_slices  = []   # tracks which slices each patch came from
- 
-            def run_batch():
-                if not batch_patches:
-                    return
-                # Stack into (N, 1, sz, sy, sx) and move to GPU in one transfer
-                batch = torch.cat(batch_patches, dim=0).to(device, non_blocking=True) # (num_batch, n_channels, sz, sy, sx)
-                output = model(batch) # (num_batch, n_classes, sz, sy, sx)
-                output_weighted = (output * map_kernel_tensor).data.cpu().numpy() # (num_batch, n_classes, sz, sy, sx)
- 
-                # Scatter each patch result back into the accumulation arrays
-                for patch_index, (slice_z, slice_y, slice_x) in enumerate(batch_slices):
-                    predict[:, :, slice_z, slice_y, slice_x] += output_weighted[patch_index]
-                    n_map[:, :, slice_z, slice_y, slice_x] += map_kernel
- 
-                batch_patches.clear()
-                batch_slices.clear()
- 
-            for slice_z, slice_y, slice_x in slices:
-                patch = image[:, :, slice_z, slice_y, slice_x] # (1, n_channels, sz, sy, sx)
-                batch_patches.append(torch.from_numpy(patch.copy()))
-                batch_slices.append((slice_z, slice_y, slice_x))
- 
-                if len(batch_patches) == args.predict_batch_size:
-                    run_batch()
-                    
-            run_batch()
- 
-        # Blend, argmax, cast, crop
-        predict = predict / n_map
-        predict = np.argmax(predict[0], axis=0)
-        predict = predict.astype(np.uint16)
-        out = predict[0:z_old, 0:y_old, 0:x_old]
- 
-        # Restore SimpleITK metadata and save
-        out = sitk.GetImageFromArray(out)
-        out.SetSpacing(orig_spacing)
-        out.SetOrigin(orig_origin)
-        out.SetDirection(orig_direction)
-        sitk.WriteImage(out, join(save_path, name))
+        source = sitk.ReadImage(image_path)
+        normalized = (sitk.GetArrayFromImage(source).astype(np.float32) - mean) / std
+        logits = sliding_window_logits(
+            model,
+            normalized,
+            args.ROI_shape,
+            args.n_classes,
+            args.predict_batch_size,
+            device,
+        )
+        prediction = np.argmax(logits, axis=0).astype(np.uint16)
+        output = sitk.GetImageFromArray(prediction)
+        output.CopyInformation(source)
+        sitk.WriteImage(output, join(save_path, Path(image_path).name))
     print("finish!")
-
-# Predict process (takes in map_kernel rather than map_kernel_tensor)
-# def predict(model, image_dir, meanstd_filename, save_path, args, map_kernel):
-#     print("Predict test data")
-#     model.eval()
-#     file = read_file_from_txt(image_dir)
-#     file_num = len(file)
-
-#     for t in range(file_num):
-#         image_path = file[t]
-#         print(image_path)
-
-#         image = sitk.ReadImage(image_path)
-#         orig_spacing = image.GetSpacing()
-#         orig_origin = image.GetOrigin()
-#         orig_direction = image.GetDirection()
-#         image = sitk.GetArrayFromImage(image)
-#         image = image.astype(np.float32)
-
-#         name = image_path[image_path.rfind("/") + 1 :]
-#         mean, std = np.load(args.root_dir + meanstd_filename)
-#         image = (image - mean) / std
-#         z_old, y_old, x_old = image.shape
-#         z = max(z_old, args.ROI_shape[0])
-#         y = max(y_old, args.ROI_shape[1])
-#         x = max(x_old, args.ROI_shape[2])
-
-#         if (z, y, x) != (z_old, y_old, x_old):
-#             image = reshape_img(image, z, y, x)
-
-#         predict = np.zeros([1, args.n_classes, z, y, x], dtype=np.float32)
-#         n_map = np.zeros([1, args.n_classes, z, y, x], dtype=np.float32)
-
-#         """
-#         Our prediction is carried out using sliding patches, 
-#         and for each patch a corresponding result is predicted, 
-#         and for the part where the patches overlap, 
-#         we use weight <map_kernel> balance, 
-#         and we agree that the closer to the center of the patch, the higher the weight
-#         """
-
-#         shape = args.ROI_shape
- 
-#         # print(np.max(map_kernal))
-#         image = image[np.newaxis, np.newaxis, :, :, :]
-#         stride_x = shape[0] // 2
-#         stride_y = shape[1] // 2
-#         stride_z = shape[2] // 2
-#         for i in range(z // stride_x - 1):
-#             for j in range(y // stride_y - 1):
-#                 for k in range(x // stride_z - 1):
-#                     image_i = image[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-#                               k * stride_z:k * stride_z + shape[2]]
-#                     image_i = torch.from_numpy(image_i)
-#                     if torch.cuda.is_available():
-#                         image_i = image_i.cuda()
-#                     with torch.no_grad():
-#                         output = model(image_i)
-#                     output = output.data.cpu().numpy()
-
-#                     predict[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-#                     k * stride_z:k * stride_z + shape[2]] += output * map_kernel
-
-#                     n_map[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-#                     k * stride_z:k * stride_z + shape[2]] += map_kernel
-
-#                 image_i = image[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-#                           x - shape[2]:x]
-#                 image_i = torch.from_numpy(image_i)
-#                 if torch.cuda.is_available():
-#                     image_i = image_i.cuda()
-#                 with torch.no_grad():
-#                     output = model(image_i)
-#                 output = output.data.cpu().numpy()
-#                 predict[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-#                 x - shape[2]:x] += output * map_kernel
-
-#                 n_map[:, :, i * stride_x:i * stride_x + shape[0], j * stride_y:j * stride_y + shape[1],
-#                 x - shape[2]:x] += map_kernel
-
-#             for k in range(x // stride_z - 1):
-#                 image_i = image[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y,
-#                           k * stride_z:k * stride_z + shape[2]]
-#                 image_i = torch.from_numpy(image_i)
-#                 if torch.cuda.is_available():
-#                     image_i = image_i.cuda()
-#                 with torch.no_grad():
-#                     output = model(image_i)
-#                 output = output.data.cpu().numpy()
-#                 predict[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y,
-#                 k * stride_z:k * stride_z + shape[2]] += output * map_kernel
-
-#                 n_map[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y,
-#                 k * stride_z:k * stride_z + shape[2]] += map_kernel
-
-#             image_i = image[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y, x - shape[2]:x]
-#             image_i = torch.from_numpy(image_i)
-#             if torch.cuda.is_available():
-#                 image_i = image_i.cuda()
-#             with torch.no_grad():
-#                 output = model(image_i)
-#             output = output.data.cpu().numpy()
-
-#             predict[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y, x - shape[2]:x] += output * map_kernel
-#             n_map[:, :, i * stride_x:i * stride_x + shape[0], y - shape[1]:y, x - shape[2]:x] += map_kernel
-
-#         for j in range(y // stride_y - 1):
-#             for k in range((x - shape[2]) // stride_z):
-#                 image_i = image[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-#                           k * stride_z:k * stride_z + shape[2]]
-#                 image_i = torch.from_numpy(image_i)
-#                 if torch.cuda.is_available():
-#                     image_i = image_i.cuda()
-#                 with torch.no_grad():
-#                     output = model(image_i)
-#                 output = output.data.cpu().numpy()
-
-#                 predict[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-#                 k * stride_z:k * stride_z + shape[2]] += output * map_kernel
-
-#                 n_map[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-#                 k * stride_z:k * stride_z + shape[2]] += map_kernel
-
-#             image_i = image[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-#                       x - shape[2]:x]
-#             image_i = torch.from_numpy(image_i)
-#             if torch.cuda.is_available():
-#                 image_i = image_i.cuda()
-#             with torch.no_grad():
-#                 output = model(image_i)
-#             output = output.data.cpu().numpy()
-
-#             predict[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-#             x - shape[2]:x] += output * map_kernel
-
-#             n_map[:, :, z - shape[0]:z, j * stride_y:j * stride_y + shape[1],
-#             x - shape[2]:x] += map_kernel
-
-#         for k in range(x // stride_z - 1):
-#             image_i = image[:, :, z - shape[0]:z, y - shape[1]:y,
-#                       k * stride_z:k * stride_z + shape[2]]
-#             image_i = torch.from_numpy(image_i)
-#             if torch.cuda.is_available():
-#                 image_i = image_i.cuda()
-#             with torch.no_grad():
-#                 output = model(image_i)
-#             output = output.data.cpu().numpy()
-
-#             predict[:, :, z - shape[0]:z, y - shape[1]:y,
-#             k * stride_z:k * stride_z + shape[2]] += output * map_kernel
-
-#             n_map[:, :, z - shape[0]:z, y - shape[1]:y,
-#             k * stride_z:k * stride_z + shape[2]] += map_kernel
-
-#         image_i = image[:, :, z - shape[0]:z, y - shape[1]:y, x - shape[2]:x]
-#         image_i = torch.from_numpy(image_i)
-#         if torch.cuda.is_available():
-#             image_i = image_i.cuda()
-#         with torch.no_grad():
-#             output = model(image_i)
-#         output = output.data.cpu().numpy()
-
-#         predict[:, :, z - shape[0]:z, y - shape[1]:y, x - shape[2]:x] += output * map_kernel
-#         n_map[:, :, z - shape[0]:z, y - shape[1]:y, x - shape[2]:x] += map_kernel
-
-#         predict = predict / n_map
-#         predict = np.argmax(predict[0], axis=0)
-#         predict = predict.astype(np.uint16)
-#         out = predict[0:z_old, 0:y_old, 0:x_old]
-#         out = sitk.GetImageFromArray(out)
-#         out.SetSpacing(orig_spacing)
-#         out.SetOrigin(orig_origin)
-#         out.SetDirection(orig_direction)
-#         sitk.WriteImage(out, join(save_path, name))
-#     print("finish!")
 
 
 def load_with_upsample(pred_nifti_path, ref_nifti_path):

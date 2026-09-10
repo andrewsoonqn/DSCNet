@@ -6,7 +6,7 @@ repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$repo_dir"
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <prepare|train|evaluate> [unet3|unet4|unet5] [extra args...]" >&2
+  echo "Usage: $0 <prepare|train|evaluate> [unet3|unet4|unet5] [Hydra overrides...]" >&2
   exit 1
 fi
 
@@ -37,7 +37,7 @@ esac
 
 activated_venv=false
 if [[ -z "${VIRTUAL_ENV:-}" ]]; then
-  for venv_activate in DSCNetEnv/bin/activate DSCNetEnv/Scripts/activate; do
+  for venv_activate in DSCNetEnv/bin/activate DSCNetEnv/Scripts/activate .venv/bin/activate; do
     if [[ -f "$venv_activate" ]]; then
       # shellcheck disable=SC1090
       source "$venv_activate"
@@ -47,10 +47,11 @@ if [[ -z "${VIRTUAL_ENV:-}" ]]; then
   done
 fi
 
-python3 DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py \
-  --action "$action" \
-  --run_label "Test_Run_${model_variant}" \
-  --unet_layers "$unet_layers" \
+python3 DSCNet_3D_opensource/Code/Kipa/DSCNet/S4_Experiment_Run.py \
+  --config-name experiment/dscnet_standard \
+  "action=$action" \
+  "data.run_label=Test_Run_${model_variant}" \
+  "model.unet_layers=$unet_layers" \
   "$@"
 
 if [[ "$activated_venv" == true ]]; then

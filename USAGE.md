@@ -4,15 +4,11 @@
 
 Navigate to the root `DSCNet` folder.
 
-In `DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py`:
+Hydra YAML under `configs/` is the only experiment specification authority. Use a named experiment and explicit Hydra overrides instead of editing Python or the Slurm bootstrap.
 
-- Update the root directory to point to the local `DSCNet_3D_opensource` folder.
-
-- Update the data directory to point to the desired data folder.
-
-- Update the run label to the desired identifier.
-
-- Update the default `--GPU_id` as required. (ID=0 is usually the GPU, ID=1 is the CPU).
+- Local named experiment: `configs/experiment/dscnet_standard.yaml`
+- Cluster runtime: `configs/runtime/slurm.yaml`
+- Validate a formal cluster experiment without submitting it: `.venv/bin/python tools/expctl.py verify configs/experiment/dscnet_standard.yaml`
 
 ##### Remote RL Instructions:
 
@@ -44,11 +40,11 @@ Run via `tmux` to keep window open:
 
 - Check available resources: `htop` and `nvtop`
 
-- Prepare one run: `python DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --action prepare --run_label <run_label>`
+- Prepare one local run: `bash run_models.sh prepare unet4 data.run_label=<run_label>`
 
-- Train with validation checkpoint selection: `OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES=<num> python -u DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --action train --run_label <run_label> 2>&1 | tee logs/session_$(date +%F_%H-%M-%S).log`
+- Train with validation checkpoint selection: `OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES=<num> bash run_models.sh train unet4 data.run_label=<run_label>`
 
-- Evaluate the frozen test set only after the protocol and checkpoint are fixed: `python DSCNet_3D_opensource/Code/Kipa/DSCNet/S0_Main.py --action evaluate --run_label <run_label>`
+- Evaluate the frozen test set only after the protocol and checkpoint are fixed: `bash run_models.sh evaluate unet4 data.run_label=<run_label> data.Dir_Weights=<weights_dir> data.model_name_max=<checkpoint_name>`
 
 - Split panes to view `nvtop` in parallel: `Ctrl +B` then `%`, navigate panes with `Ctrl + B` then left and right arrow keys
 
@@ -113,7 +109,7 @@ For preparing and training the 3D model:
 
 For evaluating a trained 3D model:
 
-- `bash run_models.sh evaluate unet4 --Dir_Weights <path/to/weights/dir> --model_name_max <checkpoint_name>`
+- `bash run_models.sh evaluate unet4 data.Dir_Weights=<path/to/weights/dir> data.model_name_max=<checkpoint_name>`
 
 ##### Temporary MLflow UI:
 

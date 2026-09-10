@@ -277,30 +277,76 @@ def resolved_yaml(config: DictConfig) -> str:
     return OmegaConf.to_yaml(config, resolve=True, sort_keys=True)
 
 
-def to_legacy_namespace(config: ExperimentConfig) -> Namespace:
-    """Flatten a typed config into the temporary legacy training interface."""
+def identity_config_yaml(config: DictConfig) -> str:
+    """Normalize resume-only controls out of experiment identity."""
+    identity = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
+    identity.training.if_retrain = True
+    identity.training.start_train_epoch = 1
+    return resolved_yaml(identity)
+
+
+def resolve_runtime_paths(args: Namespace) -> Namespace:
+    """Resolve every derived runtime path from the typed experiment config."""
+    root = Path(args.root_dir)
+    data = Path(args.data_dir)
+    args.root_dir = str(root)
+    args.data_dir = str(data)
+
+    defaults = {
+        "Tr_Image_dir": data / "train" / "image",
+        "Va_Image_dir": data / "val" / "image",
+        "Te_Image_dir": data / "test" / "image",
+        "Tr_Label_dir": data / "train" / "label",
+        "Va_Label_dir": data / "val" / "label",
+        "Te_Label_dir": data / "test" / "label",
+        "Dir_Txt": root / "Txt" / f"Txt_{args.run_label}",
+        "Dir_Log": root / "Log" / args.run_label,
+        "Dir_Save": root / "Results" / args.run_label,
+        "Dir_Weights": root / "Weights" / args.run_label,
+    }
+    for attribute, default in defaults.items():
+        value = getattr(args, attribute)
+        setattr(args, attribute, str(Path(value) if value else default))
+    args.Dir_Log = str(Path(args.Dir_Log)) + "/"
+
+    txt_dir = Path(args.Dir_Txt)
+    manifest_defaults = {
+        "Image_Tr_txt": txt_dir / "Image_Tr.txt",
+        "Image_Va_txt": txt_dir / "Image_Va.txt",
+        "Image_Te_txt": txt_dir / "Image_Te.txt",
+        "Label_Tr_txt": txt_dir / "Label_Tr.txt",
+        "Label_Va_txt": txt_dir / "Label_Va.txt",
+        "Label_Te_txt": txt_dir / "Label_Te.txt",
+    }
+    for attribute, default in manifest_defaults.items():
+        value = getattr(args, attribute)
+        setattr(args, attribute, str(Path(value) if value else default))
+
+    if getattr(args, "Meanstd_name", None) is None:
+        args.Meanstd_name = f"{args.run_label}_Meanstd.npy"
+    meanstd_path = getattr(args, "Meanstd_path", None)
+    args.Meanstd_path = str(
+        Path(meanstd_path) if meanstd_path else root / args.Meanstd_name
+    )
+    if getattr(args, "save_path", None) is None:
+        args.save_path = str(root / "Results" / args.run_label / "DSCNet")
+    if getattr(args, "save_path_max", None) is None:
+        args.save_path_max = str(root / "Results" / args.run_label / "DSCNet_max")
+    if getattr(args, "model_name", None) is None:
+        args.model_name = f"DSCNet_{args.run_label}"
+    if getattr(args, "model_name_max", None) is None:
+        args.model_name_max = f"DSCNet_{args.run_label}_max"
+    if getattr(args, "log_name", None) is None:
+        args.log_name = f"DSCNet_{args.run_label}.log"
+    return args
+
+
+def to_runtime_namespace(config: ExperimentConfig) -> Namespace:
+    """Flatten the sole typed experiment config for the existing model code."""
     values: dict[str, Any] = {"action": config.action}
     values.update(vars(config.model))
     values.update(vars(config.training))
     values.update(vars(config.data))
     values["ROI_shape"] = tuple(config.training.ROI_shape)
     values["GPU_id"] = config.runtime.gpu_id
-
-    from S0_Main import resolve_paths
-
-    return resolve_paths(Namespace(**values))
-
-
-def legacy_default_differences() -> dict[str, tuple[Any, Any]]:
-    """Return semantic differences between Hydra and retained argparse defaults."""
-    from S0_Main import parse_legacy_args
-
-    typed, _ = load_experiment_config()
-    hydra_args = to_legacy_namespace(typed)
-    legacy_args = parse_legacy_args(["--action", typed.action])
-    fields = set(vars(hydra_args)) | set(vars(legacy_args))
-    return {
-        name: (getattr(legacy_args, name, None), getattr(hydra_args, name, None))
-        for name in sorted(fields)
-        if getattr(legacy_args, name, None) != getattr(hydra_args, name, None)
-    }
+    return resolve_runtime_paths(Namespace(**values))
