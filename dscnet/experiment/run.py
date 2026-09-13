@@ -21,6 +21,7 @@ from dscnet.experiment.config import (
     to_runtime_namespace,
     validate_config,
 )
+from dscnet.experiment.modeling import log_training_model
 from dscnet.experiment.tracking import (
     RunRecorder,
     build_consumed_split_manifest,
@@ -192,8 +193,19 @@ def _execute(config, resolved, parent_run_id: str | None = None) -> dict[str, st
             final_metrics = {f"{prefix}.{name}": value for name, value in result.items()}
             recorder.log_final_metrics(final_metrics)
         _log_declared_artifacts(recorder, args, config.action)
+        logged_model = None
+        if config.action == "train" and config.runtime.formal:
+            logged_model = log_training_model(
+                recorder,
+                args=args,
+                resolved_config=resolved,
+                experiment_digest=digest,
+                uv_lock_sha256=lock_identifier,
+            )
         run_id = recorder.run_id
     output = {"run_id": str(run_id), "experiment_digest": digest}
+    if logged_model is not None:
+        output["logged_model_id"] = logged_model["model_id"]
     _write_json_from_environment("DSCNET_RUN_RESULT_PATH", output)
     if final_metrics:
         _write_json_from_environment("DSCNET_FINAL_METRICS_PATH", final_metrics)

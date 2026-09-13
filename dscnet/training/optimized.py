@@ -18,12 +18,12 @@ from dscnet.training.checkpoints import (
     load_training_checkpoint,
     save_training_checkpoint,
 )
-from dscnet.models.optimized import DSCNet
 from dscnet.data.dataset import Dataloader
+from dscnet.evaluation.inference import load_normalization, predict_probabilities
 from dscnet.evaluation.summary import log_summary, summarize_predictions
+from dscnet.models.factory import build_model
 from dscnet.training.losses import cross_loss, dice_cross_loss, entropy_regularization_cross_loss, entropy_loss
 from dscnet.evaluation.metrics import cldice_score, dice_score, to_minivess_binary_mask
-from dscnet.evaluation.sliding_window import sliding_window_logits
 
 import warnings
 
@@ -316,22 +316,21 @@ def new_predict(
     """Run the shared edge-safe inference path for the optimized model."""
     del map_kernel_tensor
     print("Predict test data")
-    mean, std = np.load(meanstd_path)
-    if not np.isfinite(std) or std == 0:
-        raise ValueError("normalization standard deviation must be finite and non-zero")
+    mean, std = load_normalization(meanstd_path)
     for image_path in read_file_from_txt(image_dir):
         print(image_path)
         source = sitk.ReadImage(image_path)
-        normalized = (sitk.GetArrayFromImage(source).astype(np.float32) - mean) / std
-        logits = sliding_window_logits(
+        probabilities = predict_probabilities(
             model,
-            normalized,
-            args.ROI_shape,
-            args.n_classes,
-            args.predict_batch_size,
-            device,
+            sitk.GetArrayFromImage(source),
+            mean=mean,
+            std=std,
+            roi_shape=args.ROI_shape,
+            n_classes=args.n_classes,
+            batch_size=args.predict_batch_size,
+            device=device,
         )
-        prediction = np.argmax(logits, axis=0).astype(np.uint16)
+        prediction = np.argmax(probabilities, axis=0).astype(np.uint16)
         output = sitk.GetImageFromArray(prediction)
         output.CopyInformation(source)
         sitk.WriteImage(output, join(save_path, Path(image_path).name))
@@ -546,17 +545,7 @@ def Predict_Network(net, args, device, map_kernel_tensor):
 def _build_model(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("CUDA available:", torch.cuda.is_available())
-    net = DSCNet(
-        n_channels=args.n_channels,
-        n_classes=args.n_classes,
-        kernel_size=args.kernel_size,
-        extend_scope=args.extend_scope,
-        if_offset=args.if_offset,
-        device=device,
-        number=args.n_basic_layer,
-        dim=args.dim,
-        epochs=args.n_epochs,
-    )
+    net = build_model(args, PIPELINE_NAME, device)
     map_kernel = generate_map_kernel(args.ROI_shape)
     map_kernel_tensor = torch.from_numpy(map_kernel).to(device)
     return net, device, map_kernel_tensor

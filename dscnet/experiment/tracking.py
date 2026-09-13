@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import mlflow
+from mlflow.entities import LoggedModelStatus
 from mlflow.exceptions import MlflowException
 from omegaconf import DictConfig, OmegaConf
 
@@ -296,6 +297,7 @@ class RunRecorder:
         self.extra_tags = dict(extra_tags or {})
         self.formal = formal
         self.run_id: str | None = None
+        self.experiment_id: str | None = None
         self.git_provenance: dict[str, Any] | None = (
             dict(git_provenance) if git_provenance is not None else None
         )
@@ -343,7 +345,8 @@ class RunRecorder:
             tags["dscnet.experiment_digest"] = self.experiment_digest
         if self.parent_run_id:
             tags["dscnet.parent_run_id"] = self.parent_run_id
-        run = self.client.create_run(self._experiment_id(), tags=tags)
+        self.experiment_id = self._experiment_id()
+        run = self.client.create_run(self.experiment_id, tags=tags)
         self.run_id = run.info.run_id
         try:
             for name, value in flatten_config(self.resolved_config).items():
@@ -398,6 +401,42 @@ class RunRecorder:
     def log_artifact(self, path: str | Path, artifact_path: str) -> None:
         assert self.client is not None and self.run_id is not None
         self.client.log_artifact(self.run_id, str(path), artifact_path=artifact_path)
+
+    def log_model_directory(
+        self,
+        local_dir: str | Path,
+        *,
+        name: str,
+        tags: Mapping[str, Any],
+        params: Mapping[str, Any],
+        source_run_id: str | None = None,
+    ):
+        """Create and upload one MLflow Logged Model without fluent run state."""
+        assert self.client is not None and self.run_id is not None
+        assert self.experiment_id is not None
+        logged = self.client.create_logged_model(
+            experiment_id=self.experiment_id,
+            name=name,
+            source_run_id=source_run_id or self.run_id,
+            tags={key: str(value) for key, value in tags.items()},
+            params={key: str(value) for key, value in params.items()},
+            model_type="pyfunc",
+        )
+        try:
+            self.client.log_model_artifacts(logged.model_id, str(local_dir))
+            logged = self.client.finalize_logged_model(
+                logged.model_id, LoggedModelStatus.READY
+            )
+        except Exception:
+            try:
+                self.client.finalize_logged_model(
+                    logged.model_id, LoggedModelStatus.FAILED
+                )
+            except Exception:
+                pass
+            raise
+        self.client.set_tag(self.run_id, "dscnet.logged_model_id", logged.model_id)
+        return logged
 
     def log_final_metrics(self, metrics: Mapping[str, float]) -> None:
         unknown = set(metrics) - STABLE_METRICS

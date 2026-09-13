@@ -154,6 +154,14 @@ class ExperimentTrackingTests(unittest.TestCase):
                     "records/dataset-manifest.json",
                 }.issubset(names)
             )
+            stored_dataset = client.download_artifacts(
+                run_id, "records/dataset-manifest.json"
+            )
+            self.assertEqual(json.loads(Path(stored_dataset).read_text()), manifest)
+            stored_config = client.download_artifacts(
+                run_id, "records/resolved-config.yaml"
+            )
+            self.assertTrue(Path(stored_config).read_text().startswith("action:"))
             final_path = client.download_artifacts(run_id, "metrics/final-metrics.json")
             self.assertEqual(json.loads(Path(final_path).read_text())["validation.dice"], 0.75)
             self.assertEqual(
@@ -161,6 +169,78 @@ class ExperimentTrackingTests(unittest.TestCase):
                 "checkpoints/best.pt",
             )
             self.assertEqual(client.list_artifacts(run_id, "logs")[0].path, "logs/train.log")
+
+    def test_logged_model_uses_client_lifecycle_and_links_to_source_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "dataset"
+            self._dataset(dataset)
+            _, resolved = load_experiment_config(
+                overrides=[f"data.data_dir={dataset}", "training.n_epochs=51"]
+            )
+            tracking_uri = f"sqlite:///{root / 'mlflow.db'}"
+            with RunRecorder(
+                tracking_uri=tracking_uri,
+                experiment_name="models",
+                artifact_root=root / "artifacts",
+                run_name="training",
+                resolved_config=resolved,
+                repo_root=REPO_ROOT,
+                dataset_manifest=build_dataset_manifest(dataset),
+            ) as recorder:
+                model_dir = root / "model"
+                model_dir.mkdir()
+                (model_dir / "MLmodel").write_text("flavors: {}\n")
+                logged = recorder.log_model_directory(
+                    model_dir,
+                    name="dscnet-standard",
+                    tags={"audit": "passed"},
+                    params={"epoch": 70},
+                )
+                run_id = recorder.run_id
+
+            client = MlflowClient(tracking_uri=tracking_uri)
+            stored = client.get_logged_model(logged.model_id)
+            self.assertEqual(stored.status, "READY")
+            self.assertEqual(stored.source_run_id, run_id)
+            self.assertEqual(stored.tags["audit"], "passed")
+            self.assertEqual(client.get_run(run_id).data.tags["dscnet.logged_model_id"], logged.model_id)
+            self.assertEqual(client.list_logged_model_artifacts(logged.model_id)[0].path, "MLmodel")
+
+    def test_logged_model_upload_failure_marks_model_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "dataset"
+            self._dataset(dataset)
+            _, resolved = load_experiment_config(
+                overrides=[f"data.data_dir={dataset}", "training.n_epochs=51"]
+            )
+            tracking_uri = f"sqlite:///{root / 'mlflow.db'}"
+            with RunRecorder(
+                tracking_uri=tracking_uri,
+                experiment_name="models",
+                artifact_root=root / "artifacts",
+                run_name="training",
+                resolved_config=resolved,
+                repo_root=REPO_ROOT,
+                dataset_manifest=build_dataset_manifest(dataset),
+            ) as recorder:
+                with patch.object(
+                    recorder.client,
+                    "log_model_artifacts",
+                    side_effect=RuntimeError("upload failed"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "upload failed"):
+                        recorder.log_model_directory(
+                            root, name="broken", tags={}, params={}
+                        )
+                experiment_id = recorder.experiment_id
+
+            models = MlflowClient(tracking_uri=tracking_uri).search_logged_models(
+                [experiment_id]
+            )
+            self.assertEqual(len(models), 1)
+            self.assertEqual(models[0].status, "FAILED")
 
     def test_evaluation_run_can_link_to_training_run(self):
         with tempfile.TemporaryDirectory() as directory:

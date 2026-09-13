@@ -10,9 +10,30 @@ from mlflow import MlflowClient
 from dscnet.experiment.config import load_experiment_config
 from dscnet.experiment.run import (
     _control_evidence,
+    _execute,
     _identity_config_yaml,
     run_configured_experiment,
 )
+
+
+class FakeRecorder:
+    def __init__(self, **kwargs):
+        self.run_id = "mlflow-run"
+        self.git_provenance = {"commit": "abc", "dirty": False}
+        self.exit_type = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.exit_type = exc_type
+        return False
+
+    def log_final_metrics(self, metrics):
+        self.metrics = metrics
+
+    def log_artifact(self, path, artifact_path):
+        pass
 
 
 class ExperimentRunTests(unittest.TestCase):
@@ -59,6 +80,49 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertEqual(
             _identity_config_yaml(initial), _identity_config_yaml(resumed)
         )
+
+    def test_successful_formal_training_packages_best_model(self):
+        config, resolved = load_experiment_config(
+            "experiment/dscnet_standard",
+            ["runtime.formal=true", "runtime.allow_dirty=false"],
+        )
+        recorder = FakeRecorder()
+        with patch("dscnet.experiment.run.RunRecorder", return_value=recorder), patch(
+            "dscnet.experiment.run.collect_git_provenance",
+            return_value={"commit": "abc", "dirty": False},
+        ), patch("dscnet.experiment.run._dataset_manifest", return_value={"digest": "data"}), patch(
+            "dscnet.experiment.run._lock_identifier", return_value="lock"
+        ), patch(
+            "dscnet.experiment.run.Process", return_value={"dice": 0.8}
+        ), patch(
+            "dscnet.experiment.run.log_training_model",
+            return_value={"model_id": "m-1"},
+        ) as package:
+            result = _execute(config, resolved)
+
+        self.assertEqual(result["logged_model_id"], "m-1")
+        package.assert_called_once()
+        self.assertIsNone(recorder.exit_type)
+
+    def test_packaging_failure_fails_formal_training_run(self):
+        config, resolved = load_experiment_config(
+            "experiment/dscnet_standard",
+            ["runtime.formal=true", "runtime.allow_dirty=false"],
+        )
+        recorder = FakeRecorder()
+        with patch("dscnet.experiment.run.RunRecorder", return_value=recorder), patch(
+            "dscnet.experiment.run.collect_git_provenance",
+            return_value={"commit": "abc", "dirty": False},
+        ), patch("dscnet.experiment.run._dataset_manifest", return_value={"digest": "data"}), patch(
+            "dscnet.experiment.run._lock_identifier", return_value="lock"
+        ), patch("dscnet.experiment.run.Process", return_value={"dice": 0.8}), patch(
+            "dscnet.experiment.run.log_training_model",
+            side_effect=RuntimeError("package failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "package failed"):
+                _execute(config, resolved)
+
+        self.assertIs(recorder.exit_type, RuntimeError)
 
     def test_configured_runner_attaches_digest_and_tracker(self):
         with tempfile.TemporaryDirectory() as directory:
