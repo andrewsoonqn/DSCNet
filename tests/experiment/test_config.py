@@ -9,6 +9,7 @@ from hydra.errors import ConfigCompositionException
 
 from dscnet import workflow
 from dscnet.experiment.config import (
+    identity_config_yaml,
     load_experiment_config,
     resolve_runtime_paths,
     resolved_yaml,
@@ -39,6 +40,21 @@ class ExperimentConfigTests(unittest.TestCase):
     def test_positive_training_values_are_enforced(self):
         with self.assertRaisesRegex(ValueError, "batch_size must be positive"):
             load_experiment_config(overrides=["training.batch_size=0"])
+
+    def test_warn_only_requires_deterministic_algorithms(self):
+        with self.assertRaisesRegex(
+            ValueError, "deterministic_warn_only requires deterministic=true"
+        ):
+            load_experiment_config(overrides=["training.deterministic=false"])
+
+        config, _ = load_experiment_config(
+            overrides=[
+                "training.deterministic=false",
+                "training.deterministic_warn_only=false",
+            ]
+        )
+        self.assertFalse(config.training.deterministic)
+        self.assertFalse(config.training.deterministic_warn_only)
 
     def test_formal_runs_reject_dirty_policy(self):
         with self.assertRaisesRegex(ValueError, "formal runs cannot allow"):
@@ -76,6 +92,15 @@ class ExperimentConfigTests(unittest.TestCase):
                 "experiment/dscnet_optimized", overrides=["model.unet_layers=3"]
             )
 
+    def test_warn_only_policy_is_part_of_experiment_identity(self):
+        _, warn_config = load_experiment_config()
+        _, strict_config = load_experiment_config(
+            overrides=["training.deterministic_warn_only=false"]
+        )
+        self.assertNotEqual(
+            identity_config_yaml(warn_config), identity_config_yaml(strict_config)
+        )
+
     def test_resolved_yaml_contains_every_effective_group(self):
         config, resolved = load_experiment_config()
         text = resolved_yaml(resolved)
@@ -83,10 +108,12 @@ class ExperimentConfigTests(unittest.TestCase):
         self.assertIn("ROI_shape:", text)
         self.assertIn("seed: 2026", text)
         self.assertIn("deterministic: true", text)
+        self.assertIn("deterministic_warn_only: true", text)
         args = to_runtime_namespace(config)
         self.assertEqual(args.kernel_size, 5)
         self.assertEqual(args.seed, 2026)
         self.assertTrue(args.deterministic)
+        self.assertTrue(args.deterministic_warn_only)
 
     def test_invalid_training_schedule_fails(self):
         with self.assertRaisesRegex(ValueError, "start_train_epoch"):

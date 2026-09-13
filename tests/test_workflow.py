@@ -1,3 +1,4 @@
+import os
 import random
 import sys
 import tempfile
@@ -39,6 +40,7 @@ class ActionDispatchTests(unittest.TestCase):
             if_retrain=True,
             seed=2026,
             deterministic=True,
+            deterministic_warn_only=True,
             config_digest="test-digest",
             **paths,
         )
@@ -57,12 +59,43 @@ class ActionDispatchTests(unittest.TestCase):
                 torch.rand(4),
             )
 
-        workflow.apply_reproducibility(2026, True)
-        first = sample()
-        workflow.apply_reproducibility(2026, True)
-        second = sample()
-        self.assertEqual(first[:2], second[:2])
-        torch.testing.assert_close(first[2], second[2], rtol=0, atol=0)
+        python_state = random.getstate()
+        numpy_state = np.random.get_state()
+        torch_state = torch.get_rng_state()
+        cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        algorithms_enabled = torch.are_deterministic_algorithms_enabled()
+        warn_only_enabled = torch.is_deterministic_algorithms_warn_only_enabled()
+        cudnn_deterministic = torch.backends.cudnn.deterministic
+        cudnn_benchmark = torch.backends.cudnn.benchmark
+        cublas_workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+        try:
+            workflow.apply_reproducibility(2026, True, False)
+            self.assertTrue(torch.are_deterministic_algorithms_enabled())
+            self.assertFalse(torch.is_deterministic_algorithms_warn_only_enabled())
+
+            workflow.apply_reproducibility(2026, True, True)
+            first = sample()
+            workflow.apply_reproducibility(2026, True, True)
+            second = sample()
+            self.assertEqual(first[:2], second[:2])
+            torch.testing.assert_close(first[2], second[2], rtol=0, atol=0)
+            self.assertTrue(torch.are_deterministic_algorithms_enabled())
+            self.assertTrue(torch.is_deterministic_algorithms_warn_only_enabled())
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+            torch.set_rng_state(torch_state)
+            if cuda_states is not None:
+                torch.cuda.set_rng_state_all(cuda_states)
+            torch.use_deterministic_algorithms(
+                algorithms_enabled, warn_only=warn_only_enabled
+            )
+            torch.backends.cudnn.deterministic = cudnn_deterministic
+            torch.backends.cudnn.benchmark = cudnn_benchmark
+            if cublas_workspace is None:
+                os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+            else:
+                os.environ["CUBLAS_WORKSPACE_CONFIG"] = cublas_workspace
 
     def test_process_rejects_configuration_without_a_hydra_digest(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -82,7 +115,7 @@ class ActionDispatchTests(unittest.TestCase):
             ):
                 workflow.Process(args)
 
-            reproducibility.assert_called_once_with(2026, True)
+            reproducibility.assert_called_once_with(2026, True, True)
             pipeline.Train.assert_called_once_with(args)
             pipeline.Evaluate.assert_not_called()
 

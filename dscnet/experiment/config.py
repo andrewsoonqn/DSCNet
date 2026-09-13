@@ -88,6 +88,7 @@ class TrainingConfig:
     earlystop_patience: int = 30
     seed: int = 2026
     deterministic: bool = True
+    deterministic_warn_only: bool = True
 
 
 @dataclass
@@ -239,6 +240,8 @@ def validate_config(config: ExperimentConfig) -> ExperimentConfig:
         raise ValueError("min_beta must not exceed beta")
     if config.training.seed < 0:
         raise ValueError("seed must be non-negative")
+    if config.training.deterministic_warn_only and not config.training.deterministic:
+        raise ValueError("deterministic_warn_only requires deterministic=true")
 
     if config.runtime.kind not in {"local", "slurm"}:
         raise ValueError("runtime.kind must be local or slurm")

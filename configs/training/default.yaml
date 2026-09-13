@@ -28,3 +28,4 @@ earlystop_threshold: 0.002
 earlystop_patience: 30
 seed: 2026
 deterministic: true
+deterministic_warn_only: true

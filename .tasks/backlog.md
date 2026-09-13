@@ -2,6 +2,8 @@
 
 ## Now
 
+- [ ] Complete one full standard DSCNet training run.
+
 ## Later
 
 ## Done

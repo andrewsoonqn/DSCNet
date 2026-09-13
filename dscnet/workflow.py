@@ -83,7 +83,7 @@ def validate_action_artifacts(args):
         raise ValueError(f"unsupported action: {args.action}")
 
 
-def apply_reproducibility(seed, deterministic):
+def apply_reproducibility(seed, deterministic, deterministic_warn_only):
     """Apply the resolved reproducibility settings before pipeline imports."""
     import numpy as np
     import torch
@@ -93,7 +93,9 @@ def apply_reproducibility(seed, deterministic):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    torch.use_deterministic_algorithms(deterministic)
+    torch.use_deterministic_algorithms(
+        deterministic, warn_only=deterministic_warn_only
+    )
     if hasattr(torch.backends, "cudnn"):
         torch.backends.cudnn.deterministic = deterministic
         torch.backends.cudnn.benchmark = not deterministic
@@ -105,7 +107,9 @@ def Process(args):
     if not getattr(args, "config_digest", None):
         raise RuntimeError("a resolved Hydra experiment digest is required")
     validate_action_artifacts(args)
-    apply_reproducibility(args.seed, args.deterministic)
+    apply_reproducibility(
+        args.seed, args.deterministic, args.deterministic_warn_only
+    )
     Create_files(args)
 
     if args.action == "prepare":
