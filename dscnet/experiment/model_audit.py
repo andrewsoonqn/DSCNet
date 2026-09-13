@@ -236,11 +236,12 @@ def _create_version(client, *, logged_model, training_run_id: str):
         raise RuntimeError("dscnet-standard already has a model version; refusing v1 overwrite")
     version = client.create_model_version(
         name=name,
-        source=f"models:/{logged_model.model_id}",
+        source=logged_model.artifact_location,
         run_id=training_run_id,
         model_id=logged_model.model_id,
         tags={
             "dscnet.audit": "passed",
+            "dscnet.logged_model_id": logged_model.model_id,
             "dscnet.test_evaluation": "reported-not-selected",
             "dscnet.training_run_id": training_run_id,
         },
@@ -252,7 +253,11 @@ def _create_version(client, *, logged_model, training_run_id: str):
     if str(version.version) != "1":
         raise RuntimeError("first dscnet-standard model version is not version 1")
     verified = client.get_model_version(name, "1")
-    if verified.model_id != logged_model.model_id or verified.run_id != training_run_id:
+    if (
+        verified.source != logged_model.artifact_location
+        or verified.run_id != training_run_id
+        or verified.tags.get("dscnet.logged_model_id") != logged_model.model_id
+    ):
         raise RuntimeError("registered model version does not match audited source")
     return version
 

@@ -4,8 +4,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
+from mlflow.entities import LoggedModelStatus
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import RESOURCE_ALREADY_EXISTS
+from mlflow.tracking import MlflowClient
 
 from dscnet.experiment.model_audit import (
     _best_validation_metrics,
@@ -64,16 +66,66 @@ class ModelAuditTests(unittest.TestCase):
 
     def test_registry_version_is_verified_without_assigning_alias(self):
         client = MagicMock()
-        logged = SimpleNamespace(model_id="m-1")
-        created = SimpleNamespace(version="1", model_id="m-1", run_id="run-1")
+        logged = SimpleNamespace(model_id="m-1", artifact_location="/models/m-1")
+        created = SimpleNamespace(
+            version="1",
+            source="/models/m-1",
+            run_id="run-1",
+            tags={"dscnet.logged_model_id": "m-1"},
+        )
         client.search_model_versions.return_value = []
         client.create_model_version.return_value = created
         client.get_model_version.return_value = created
 
         _create_version(client, logged_model=logged, training_run_id="run-1")
 
+        client.create_model_version.assert_called_once_with(
+            name="dscnet-standard",
+            source="/models/m-1",
+            run_id="run-1",
+            model_id="m-1",
+            tags={
+                "dscnet.audit": "passed",
+                "dscnet.logged_model_id": "m-1",
+                "dscnet.test_evaluation": "reported-not-selected",
+                "dscnet.training_run_id": "run-1",
+            },
+            description=(
+                "Provisional baseline selected by validation performance; untouched test "
+                "metrics are reported in the linked audit and were not used for selection."
+            ),
+        )
         client.get_model_version.assert_called_once_with("dscnet-standard", "1")
         client.set_registered_model_alias.assert_not_called()
+
+    def test_sqlite_registry_promotes_logged_model_artifact_location(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            uri = f"sqlite:///{root / 'mlflow.db'}"
+            client = MlflowClient(tracking_uri=uri, registry_uri=uri)
+            experiment_id = client.create_experiment(
+                "model-audit", artifact_location=str(root / "artifacts")
+            )
+            run_id = client.create_run(experiment_id).info.run_id
+            logged = client.create_logged_model(
+                experiment_id=experiment_id,
+                name="audit-candidate",
+                source_run_id=run_id,
+                model_type="pyfunc",
+            )
+            client.finalize_logged_model(
+                logged.model_id, status=LoggedModelStatus.READY
+            )
+
+            version = _create_version(
+                client, logged_model=logged, training_run_id=run_id
+            )
+            stored = client.get_model_version("dscnet-standard", "1")
+
+            self.assertEqual(str(version.version), "1")
+            self.assertEqual(stored.source, logged.artifact_location)
+            self.assertEqual(stored.run_id, run_id)
+            self.assertEqual(stored.tags["dscnet.logged_model_id"], logged.model_id)
 
     def test_existing_registry_version_is_never_overwritten(self):
         client = MagicMock()
@@ -86,7 +138,9 @@ class ModelAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "refusing v1 overwrite"):
             _create_version(
                 client,
-                logged_model=SimpleNamespace(model_id="m-new"),
+                logged_model=SimpleNamespace(
+                    model_id="m-new", artifact_location="/models/m-new"
+                ),
                 training_run_id="run-new",
             )
 
@@ -99,20 +153,29 @@ class ModelAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(MlflowException, "denied"):
             _create_version(
                 client,
-                logged_model=SimpleNamespace(model_id="m-new"),
+                logged_model=SimpleNamespace(
+                    model_id="m-new", artifact_location="/models/m-new"
+                ),
                 training_run_id="run-new",
             )
         client.get_registered_model.assert_not_called()
 
     def test_champion_alias_is_the_final_operation(self):
         client = MagicMock()
-        ready = SimpleNamespace(model_id="m-1", status="READY")
+        ready = SimpleNamespace(
+            model_id="m-1", status="READY", artifact_location="/models/m-1"
+        )
         client.get_run.return_value = SimpleNamespace(
             info=SimpleNamespace(status="FINISHED")
         )
         client.get_logged_model.return_value = ready
         client.search_model_versions.return_value = []
-        created = SimpleNamespace(version="1", model_id="m-1", run_id="run-1")
+        created = SimpleNamespace(
+            version="1",
+            source="/models/m-1",
+            run_id="run-1",
+            tags={"dscnet.logged_model_id": "m-1"},
+        )
         client.create_model_version.return_value = created
         client.get_model_version.return_value = created
         _promote_completed_audit(
@@ -140,14 +203,55 @@ class ModelAuditTests(unittest.TestCase):
                     info=SimpleNamespace(status="FINISHED")
                 )
                 client.get_logged_model.return_value = SimpleNamespace(
-                    model_id="m-1", status="READY"
+                    model_id="m-1",
+                    status="READY",
+                    artifact_location="/models/m-1",
                 )
                 client.search_model_versions.return_value = []
-                created = SimpleNamespace(version="1", model_id="m-1", run_id="run-1")
+                created = SimpleNamespace(
+                    version="1",
+                    source="/models/m-1",
+                    run_id="run-1",
+                    tags={"dscnet.logged_model_id": "m-1"},
+                )
                 client.create_model_version.return_value = created
                 client.get_model_version.return_value = created
                 getattr(client, failing_method).side_effect = RuntimeError("failure")
                 with self.assertRaisesRegex(RuntimeError, "failure"):
+                    _promote_completed_audit(
+                        client,
+                        audit_run_id="audit-1",
+                        logged_model_id="m-1",
+                        training_run_id="run-1",
+                    )
+                client.set_registered_model_alias.assert_not_called()
+
+    def test_persisted_version_mismatches_never_assign_alias(self):
+        mismatches = (
+            {"source": "/wrong", "run_id": "run-1", "logged_id": "m-1"},
+            {"source": "/models/m-1", "run_id": "wrong", "logged_id": "m-1"},
+            {"source": "/models/m-1", "run_id": "run-1", "logged_id": "wrong"},
+        )
+        for mismatch in mismatches:
+            with self.subTest(mismatch=mismatch):
+                client = MagicMock()
+                client.get_run.return_value = SimpleNamespace(
+                    info=SimpleNamespace(status="FINISHED")
+                )
+                client.get_logged_model.return_value = SimpleNamespace(
+                    model_id="m-1",
+                    status="READY",
+                    artifact_location="/models/m-1",
+                )
+                client.search_model_versions.return_value = []
+                client.create_model_version.return_value = SimpleNamespace(version="1")
+                client.get_model_version.return_value = SimpleNamespace(
+                    version="1",
+                    source=mismatch["source"],
+                    run_id=mismatch["run_id"],
+                    tags={"dscnet.logged_model_id": mismatch["logged_id"]},
+                )
+                with self.assertRaisesRegex(RuntimeError, "audited source"):
                     _promote_completed_audit(
                         client,
                         audit_run_id="audit-1",
