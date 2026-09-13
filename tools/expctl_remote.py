@@ -947,6 +947,7 @@ def _ui_start(args: argparse.Namespace) -> dict:
                 **os.environ,
                 "MLFLOW_AUTH_CONFIG_PATH": str(auth_config),
                 "MLFLOW_FLASK_SERVER_SECRET_KEY": csrf_secret,
+                "MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "false",
             },
         )
     identity = None

@@ -580,6 +580,10 @@ class ExpctlRemoteTests(unittest.TestCase):
         self.assertEqual(command[command.index("--app-name") + 1], "basic-auth")
         self.assertIn("MLFLOW_AUTH_CONFIG_PATH", launch.call_args.kwargs["env"])
         self.assertIn("MLFLOW_FLASK_SERVER_SECRET_KEY", launch.call_args.kwargs["env"])
+        self.assertEqual(
+            launch.call_args.kwargs["env"]["MLFLOW_SERVER_ENABLE_JOB_EXECUTION"],
+            "false",
+        )
         self.assertEqual(started["authentication"], "basic")
         self.assertEqual(started["username"], "dscnet-ui")
         self.assertRegex(started["password"], r"^[A-Za-z0-9_-]{40,64}$")

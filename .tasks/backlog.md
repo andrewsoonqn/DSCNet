@@ -6,6 +6,10 @@
 
 ## Done
 
+- [x] Publish the restructured repository and cut xlogin1 over to lock-keyed uv environments.
+- [x] Validate the restructured repository without committing or pushing.
+- [x] Migrate the legacy numbered modules into `src/dscnet`.
+- [x] Restructure assets and standalone scripts.
 - [x] Run final validation and verify preserved unrelated state.
 - [x] Run Slurm job 835663 and retrieve run `fb7760a557e1969a` artifacts.
 - [x] Phase 6: cut over configuration ownership and prove recovery.

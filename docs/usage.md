@@ -122,6 +122,6 @@ Training does not require the UI. Starting the UI requires the cluster environme
 .venv/bin/python tools/expctl.py ui stop
 ```
 
-Open the URL returned by `ui start` and use its generated credentials. Both the remote reader and local SSH tunnel bind to `127.0.0.1`; basic authentication also protects the reader because the login node is shared. The configured 60-minute timeout stops the reader and tunnel without interrupting training.
+Open the URL returned by `ui start` and use its generated credentials. Both the remote reader and local SSH tunnel bind to `127.0.0.1`; basic authentication also protects the reader because the login node is shared. The configured 60-minute timeout stops the reader and tunnel without interrupting training. The tracking UI disables MLflow server job execution because experiments run through Slurm and the shared login node has a strict process limit.
 
 Cluster MLflow metadata lives at `/home/a/andrewsq/data/urop/experiments/mlflow.db`; artifacts live at `/home/a/andrewsq/data/urop/experiments/mlflow-artifacts`. Automatic retrieval rejects files above 8 GiB and runs above 12 GiB.
