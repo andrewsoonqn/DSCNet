@@ -339,7 +339,7 @@ mlflow ui \
 
 <Phase title="Cut over and prove recovery" status="planned">
 
-After shadow-mode equivalence, remove duplicate configuration ownership from `src/dscnet/workflow.py` and `scripts/run_slurm.sh`. Test interruption, resume, awkward-volume inference, and retrieval before treating the workflow as experiment-ready.
+After shadow-mode equivalence, remove duplicate configuration ownership from `dscnet/workflow.py` and `scripts/run_slurm.sh`. Test interruption, resume, awkward-volume inference, and retrieval before treating the workflow as experiment-ready.
 
 <Checklist title="Experiment-ready gate">
 - [ ] Same seed and configuration reproduce the expected deterministic smoke result
@@ -365,17 +365,17 @@ After shadow-mode equivalence, remove duplicate configuration ownership from `sr
 - add configs/runtime/local.yaml -- local execution paths
 - add configs/runtime/slurm.yaml -- reviewed cluster defaults
 - add configs/experiment/ -- named experiment specifications
-- add src/dscnet/experiment/config.py -- typed schemas and semantic validation
-- add src/dscnet/experiment/tracking.py -- MLflow and provenance boundary
+- add dscnet/experiment/config.py -- typed schemas and semantic validation
+- add dscnet/experiment/tracking.py -- MLflow and provenance boundary
 - add tools/expctl.py -- deterministic verify, submit, inspect, and fetch CLI
-- add .pi/extensions/experiment-manager.ts -- narrow Pi wrapper around expctl
-- add tests/test_experiment_config.py -- schema and ignored-option failures
-- add tests/test_experiment_tracking.py -- recorded provenance contract
-- add tests/test_expctl.py -- fake SSH and Slurm lifecycle
-- modify src/dscnet/workflow.py -- temporary adapter, then Hydra entry point
+- add .pi/extensions/experiment-control/ -- narrow Pi wrapper around expctl
+- add tests/experiment/test_config.py -- schema and ignored-option failures
+- add tests/experiment/test_tracking.py -- recorded provenance contract
+- add tests/tools/test_expctl.py -- fake SSH and Slurm lifecycle
+- modify dscnet/workflow.py -- temporary adapter, then Hydra entry point
 - modify scripts/run_slurm.sh -- cluster bootstrap only
 - modify pyproject.toml and uv.lock -- pinned Hydra and MLflow dependency authority
-- modify docs/usage.md -- human workflow and recovery steps
+- modify the parent UROP AGENTS.md -- human workflow and recovery rules
 </FileTree>
 
 <Callout type="note">

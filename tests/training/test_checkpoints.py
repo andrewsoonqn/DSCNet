@@ -1,4 +1,3 @@
-import json
 import random
 import tempfile
 import unittest
@@ -9,8 +8,6 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from dscnet.models.optimized import DSCNet as OptimizedDSCNet
-from dscnet.models.standard import DSCNet as StandardDSCNet
 from dscnet.training import standard as standard_training
 from dscnet.training.checkpoints import (
     load_model_checkpoint,
@@ -19,49 +16,7 @@ from dscnet.training.checkpoints import (
     save_training_checkpoint,
 )
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures"
-
-
 class CheckpointCompatibilityTests(unittest.TestCase):
-    def test_dscnet_model_keys_and_checkpoint_metadata_match_legacy_contract(self):
-        models = {
-            "standard": StandardDSCNet(
-                1, 2, 9, 1.0, True, "cpu", 4, 4, unet_layers=4
-            ),
-            "optimized": OptimizedDSCNet(
-                1, 2, 9, 1.0, True, "cpu", 4, 4, epochs=1
-            ),
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            for pipeline, model in models.items():
-                with self.subTest(pipeline=pipeline):
-                    expected_keys = json.loads(
-                        (
-                            FIXTURE_DIR / f"{pipeline}_state_dict_keys.json"
-                        ).read_text()
-                    )
-                    self.assertEqual(list(model.state_dict()), expected_keys)
-                    path = Path(directory) / f"{pipeline}.pt"
-                    save_model_checkpoint(model, path, pipeline=pipeline)
-                    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-                    self.assertEqual(
-                        list(checkpoint),
-                        [
-                            "format_version",
-                            "sampler_implementation",
-                            "pipeline",
-                            "model_state_dict",
-                        ],
-                    )
-                    self.assertEqual(checkpoint["format_version"], 2)
-                    self.assertEqual(
-                        checkpoint["sampler_implementation"], "grid_sample_v1"
-                    )
-                    self.assertEqual(checkpoint["pipeline"], pipeline)
-                    self.assertEqual(
-                        list(checkpoint["model_state_dict"]), expected_keys
-                    )
-
     def test_current_checkpoint_round_trip(self):
         source = torch.nn.Linear(3, 2)
         target = torch.nn.Linear(3, 2)

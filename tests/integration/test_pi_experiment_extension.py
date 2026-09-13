@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import unittest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 EXTENSION = REPO_ROOT / ".pi" / "extensions" / "experiment-control" / "index.ts"
 COMMAND_TESTS = EXTENSION.with_name("commands.test.mjs")
 

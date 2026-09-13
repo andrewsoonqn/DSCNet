@@ -42,7 +42,7 @@ if [[ -z "${VIRTUAL_ENV:-}" && -f ".venv/bin/activate" ]]; then
   activated_venv=true
 fi
 
-export PYTHONPATH="$repo_dir/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$repo_dir${PYTHONPATH:+:$PYTHONPATH}"
 python3 -m dscnet \
   --config-name experiment/dscnet_standard \
   "action=$action" \

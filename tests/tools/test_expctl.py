@@ -13,9 +13,8 @@ from unittest.mock import Mock, call, patch
 
 from omegaconf import OmegaConf
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = REPO_ROOT / "src"
-sys.path.insert(0, str(SRC_DIR))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 from expctl import (
@@ -233,11 +232,11 @@ class ExpctlControllerTests(unittest.TestCase):
             subprocess.run(
                 ["git", "-C", str(root), "config", "user.name", "Test"], check=True
             )
-            for path in ("tools", "docs", "src/dscnet", "scripts"):
+            for path in ("tools", "docs", "dscnet", "scripts"):
                 (root / path).mkdir(parents=True)
             execution_files = {
                 "tools/run.py": "value = 1\n",
-                "src/dscnet/core.py": "value = 1\n",
+                "dscnet/core.py": "value = 1\n",
                 "scripts/run.sh": "#!/usr/bin/env bash\n",
                 "uv.lock": "version = 1\n",
             }
@@ -302,7 +301,7 @@ class ExpctlControllerTests(unittest.TestCase):
             script = (control / "job.sbatch").read_text()
             with tarfile.open(control / "source.tar.gz") as archive:
                 snapshot_paths = set(archive.getnames())
-        self.assertIn("src/dscnet/__main__.py", snapshot_paths)
+        self.assertIn("dscnet/__main__.py", snapshot_paths)
         self.assertIn("scripts/run_slurm.sh", snapshot_paths)
         self.assertIn("uv.lock", snapshot_paths)
         self.assertIn("pyproject.toml", snapshot_paths)

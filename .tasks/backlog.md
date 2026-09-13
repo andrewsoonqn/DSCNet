@@ -6,9 +6,10 @@
 
 ## Done
 
+- [x] Move the Python package to root `dscnet` and mirror tests by subsystem.
 - [x] Publish the restructured repository and cut xlogin1 over to lock-keyed uv environments.
 - [x] Validate the restructured repository without committing or pushing.
-- [x] Migrate the legacy numbered modules into `src/dscnet`.
+- [x] Migrate the legacy numbered modules into the root `dscnet` package.
 - [x] Restructure assets and standalone scripts.
 - [x] Run final validation and verify preserved unrelated state.
 - [x] Run Slurm job 835663 and retrieve run `fb7760a557e1969a` artifacts.

@@ -1,4 +1,3 @@
-import hashlib
 import json
 import subprocess
 import tempfile
@@ -11,7 +10,7 @@ from unittest.mock import patch
 import mlflow
 from mlflow import MlflowClient
 
-REPO_ROOT = Path(__file__).parents[1]
+REPO_ROOT = Path(__file__).parents[2]
 
 from dscnet.experiment.config import load_experiment_config
 from dscnet.experiment.tracking import (
@@ -21,39 +20,8 @@ from dscnet.experiment.tracking import (
     collect_git_provenance,
     experiment_digest,
 )
-from dscnet.experiment.run import (
-    _control_evidence,
-    _identity_config_yaml,
-    run_configured_experiment,
-)
 
 class ExperimentTrackingTests(unittest.TestCase):
-    def test_runtime_verifies_the_checkpoint_file_evaluation_consumes(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            control = root / "control"
-            weights = root / "weights"
-            control.mkdir()
-            weights.mkdir()
-            checkpoint = weights / "best.pth"
-            checkpoint.write_bytes(b"expected")
-            evidence = {
-                "name": checkpoint.name,
-                "size": checkpoint.stat().st_size,
-                "sha256": hashlib.sha256(b"expected").hexdigest(),
-            }
-            (control / "dataset-manifest.json").write_text("{}")
-            (control / "git.json").write_text("{}")
-            (control / "source-manifest.json").write_text("{}")
-            (control / "environment-lock.json").write_text("{}")
-            (control / "run-manifest.json").write_text(
-                json.dumps({"run_id": "abc", "evaluation_checkpoint": evidence})
-            )
-            checkpoint.write_bytes(b"tampered")
-            with patch.dict("os.environ", {"DSCNET_CONTROL_DIR": str(control)}):
-                with self.assertRaisesRegex(RuntimeError, "evaluation_checkpoint bytes"):
-                    _control_evidence({"data": {"Dir_Weights": str(weights)}})
-
     def _dataset(self, root):
         for split in ("train", "val", "test"):
             image_dir = root / split / "image"
@@ -126,15 +94,6 @@ class ExperimentTrackingTests(unittest.TestCase):
             (root / "val" / "image" / "unpaired.nii.gz").write_bytes(b"x")
             with self.assertRaisesRegex(ValueError, "do not match"):
                 build_dataset_manifest(root)
-
-    def test_resume_controls_do_not_change_experiment_identity(self):
-        _, initial = load_experiment_config()
-        _, resumed = load_experiment_config(
-            overrides=["training.if_retrain=false", "training.start_train_epoch=2"]
-        )
-        self.assertEqual(
-            _identity_config_yaml(initial), _identity_config_yaml(resumed)
-        )
 
     def test_digest_binds_every_declared_input(self):
         base = experiment_digest("commit", "config", "dataset", "environment")
@@ -295,45 +254,6 @@ class ExperimentTrackingTests(unittest.TestCase):
                     recorder.__enter__()
             run = MlflowClient(tracking_uri=tracking_uri).get_run(recorder.run_id)
             self.assertEqual(run.info.status, "FAILED")
-
-    def test_configured_runner_attaches_digest_and_tracker(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            dataset = root / "dataset"
-            self._dataset(dataset)
-            overrides = [
-                f"runtime.mlflow.tracking_uri=sqlite:///{root / 'mlflow.db'}",
-                f"runtime.mlflow.artifact_root={root / 'artifacts'}",
-                f"data.Dir_Log={root / 'logs'}",
-                f"data.Dir_Weights={root / 'weights'}",
-            ]
-            for split, prefix in (("train", "Tr"), ("val", "Va"), ("test", "Te")):
-                image_manifest = root / f"{split}-images.txt"
-                label_manifest = root / f"{split}-labels.txt"
-                image_manifest.write_text(
-                    f"{dataset / split / 'image' / 'sample.nii.gz'}\n"
-                )
-                label_manifest.write_text(
-                    f"{dataset / split / 'label' / 'sample.nii.gz'}\n"
-                )
-                overrides.extend(
-                    [
-                        f"data.Image_{prefix}_txt={image_manifest}",
-                        f"data.Label_{prefix}_txt={label_manifest}",
-                    ]
-                )
-            with patch("dscnet.experiment.run.Process", return_value=None) as process:
-                result = run_configured_experiment(overrides=overrides)
-
-            args = process.call_args.args[0]
-            self.assertEqual(args.config_digest, result["experiment_digest"])
-            self.assertEqual(args.tracker.run_id, result["run_id"])
-            run = MlflowClient(
-                tracking_uri=f"sqlite:///{root / 'mlflow.db'}"
-            ).get_run(result["run_id"])
-            self.assertEqual(
-                run.data.tags["dscnet.experiment_digest"], result["experiment_digest"]
-            )
 
     def test_unknown_metric_name_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

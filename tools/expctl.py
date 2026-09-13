@@ -27,8 +27,8 @@ import time
 from typing import Any, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = REPO_ROOT / "src"
-sys.path.insert(0, str(SRC_DIR))
+PACKAGE_PARENT = REPO_ROOT
+sys.path.insert(0, str(PACKAGE_PARENT))
 
 from omegaconf import OmegaConf
 
@@ -217,7 +217,7 @@ def _execution_dirty_paths(root: Path) -> list[str]:
             or path.startswith("configs/")
             or path.startswith("tools/")
             or path.startswith("scripts/")
-            or path.startswith("src/")
+            or path.startswith("dscnet/")
         ):
             paths.append(path)
     return sorted(set(paths))

@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, Mock, call, patch
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 import expctl_remote
