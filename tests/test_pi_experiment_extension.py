@@ -4,11 +4,9 @@ import shutil
 import subprocess
 import unittest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = REPO_ROOT / ".pi" / "extensions" / "experiment-control" / "index.ts"
 COMMAND_TESTS = EXTENSION.with_name("commands.test.mjs")
-
 
 class PiExperimentExtensionTests(unittest.TestCase):
     def test_exposes_exactly_the_six_controller_tools(self):
@@ -84,7 +82,6 @@ class PiExperimentExtensionTests(unittest.TestCase):
         )
         self.assertIsNotNone(response, stdout + stderr)
         self.assertTrue(response["success"], response)
-
 
 if __name__ == "__main__":
     unittest.main()

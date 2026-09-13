@@ -1,20 +1,9 @@
-import sys
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-MODULE_DIR = (
-    Path(__file__).parents[1]
-    / "DSCNet_3D_opensource"
-    / "Code"
-    / "Kipa"
-    / "DSCNet"
-)
-sys.path.insert(0, str(MODULE_DIR))
-
-from S3_Metrics import cldice_score, dice_score, to_minivess_binary_mask
-
+from dscnet.evaluation.metrics import cldice_score, dice_score, to_minivess_binary_mask
 
 class BinaryMaskTests(unittest.TestCase):
     def test_accepts_three_dimensional_integer_mask(self):
@@ -27,7 +16,6 @@ class BinaryMaskTests(unittest.TestCase):
     def test_rejects_unexpected_label(self):
         with self.assertRaisesRegex(ValueError, r"found \[0, 2\]"):
             to_minivess_binary_mask(np.array([0, 2]), "label")
-
 
 class DiceScoreTests(unittest.TestCase):
     def test_perfect_mask_scores_one(self):
@@ -49,7 +37,6 @@ class DiceScoreTests(unittest.TestCase):
     def test_rejects_shape_mismatch(self):
         with self.assertRaisesRegex(ValueError, "shapes differ"):
             dice_score(np.zeros((2, 3)), np.zeros((3, 2)))
-
 
 class ClDiceScoreTests(unittest.TestCase):
     def test_perfect_vessel_scores_one(self):
@@ -93,7 +80,6 @@ class ClDiceScoreTests(unittest.TestCase):
         score = cldice_score(prediction, target)
         self.assertGreater(score, 0.0)
         self.assertLess(score, 1.0)
-
 
 if __name__ == "__main__":
     unittest.main()

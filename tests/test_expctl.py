@@ -5,6 +5,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -13,6 +14,8 @@ from unittest.mock import Mock, call, patch
 from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = REPO_ROOT / "src"
+sys.path.insert(0, str(SRC_DIR))
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 from expctl import (
@@ -22,17 +25,15 @@ from expctl import (
     LocalTunnelManager,
     SubprocessTransport,
     _bounded_detail,
+    _environment_lock,
     _execution_dirty_paths,
     _run_tunnel_worker,
 )
 
-sys.path.insert(
-    0, str(REPO_ROOT / "DSCNet_3D_opensource" / "Code" / "Kipa" / "DSCNet")
-)
-from S4_Experiment_Run import _control_evidence
+from dscnet.experiment.run import _control_evidence
 
 EXPERIMENT = REPO_ROOT / "configs" / "experiment" / "dscnet_standard.yaml"
-OVERRIDES = [
+BASE_OVERRIDES = [
     "action=prepare",
     "runtime.formal=false",
     "runtime.allow_dirty=true",
@@ -50,6 +51,8 @@ class FakeTransport:
         self.remote_files = {}
         self.remote_ui_running = False
         self.remote_ui_deadline = None
+        self.environment_status = "READY"
+        self.environment_job_id = None
 
     def ssh(self, host, argv):
         self.calls.append(("ssh", host, tuple(argv)))
@@ -94,6 +97,19 @@ class FakeTransport:
             return CommandResult(0, json.dumps({"state": "off", "stopped": True}))
         if "verify-data" in argv:
             return CommandResult(0, json.dumps({"status": "verified"}))
+        if "environment-ensure" in argv:
+            digest = argv[argv.index("--uv-lock-sha256") + 1]
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "status": self.environment_status,
+                        "job_id": self.environment_job_id,
+                        "environment_id": digest,
+                        "environment_path": f"/home/a/andrewsq/data/urop/environments/{digest}",
+                    }
+                ),
+            )
         if "submit" in argv:
             self.submit_count += 1
             if self.fail_submit:
@@ -183,6 +199,18 @@ class FakeTunnelManager:
 
 class ExpctlControllerTests(unittest.TestCase):
     def setUp(self):
+        dataset_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(dataset_directory.cleanup)
+        dataset_root = Path(dataset_directory.name)
+        for split in ("train", "val", "test"):
+            for kind in ("image", "label"):
+                path = dataset_root / split / kind / "case.nii.gz"
+                path.parent.mkdir(parents=True)
+                path.write_bytes(f"{split}-{kind}".encode())
+        self.overrides = [
+            *BASE_OVERRIDES,
+            f"data.data_dir={dataset_root}",
+        ]
         account_patch = patch(
             "expctl.TRUSTED_ACCOUNTS", frozenset({"allusers", "test-account"})
         )
@@ -205,9 +233,16 @@ class ExpctlControllerTests(unittest.TestCase):
             subprocess.run(
                 ["git", "-C", str(root), "config", "user.name", "Test"], check=True
             )
-            (root / "tools").mkdir()
-            (root / "docs").mkdir()
-            (root / "tools" / "run.py").write_text("value = 1\n")
+            for path in ("tools", "docs", "src/dscnet", "scripts"):
+                (root / path).mkdir(parents=True)
+            execution_files = {
+                "tools/run.py": "value = 1\n",
+                "src/dscnet/core.py": "value = 1\n",
+                "scripts/run.sh": "#!/usr/bin/env bash\n",
+                "uv.lock": "version = 1\n",
+            }
+            for path, content in execution_files.items():
+                (root / path).write_text(content)
             (root / "docs" / "note.md").write_text("note\n")
             (root / ".gitignore").write_text("cache/\n")
             subprocess.run(["git", "-C", str(root), "add", "."], check=True)
@@ -217,27 +252,34 @@ class ExpctlControllerTests(unittest.TestCase):
             (root / "docs" / "note.md").write_text("changed note\n")
             (root / ".gitignore").write_text("cache/\nartifacts/\n")
             self.assertEqual(_execution_dirty_paths(root), [])
-            (root / "tools" / "run.py").write_text("value = 2\n")
-            self.assertEqual(_execution_dirty_paths(root), ["tools/run.py"])
+            for path in execution_files:
+                with self.subTest(path=path):
+                    (root / path).write_text("changed\n")
+                    self.assertEqual(_execution_dirty_paths(root), [path])
+                    subprocess.run(
+                        ["git", "-C", str(root), "checkout", "--", path],
+                        check=True,
+                    )
 
     def test_verify_is_non_persistent_and_rejects_non_allowlisted_host(self):
         with tempfile.TemporaryDirectory() as directory:
             controller = self._controller(Path(directory))
-            verified = controller.verify(EXPERIMENT, OVERRIDES)
+            verified = controller.verify(EXPERIMENT, self.overrides)
             self.assertEqual(verified["state"], "verified")
             self.assertFalse((Path(directory) / "runs").exists())
             with self.assertRaisesRegex(ExpctlError, "host is not allowlisted"):
                 controller.verify(
                     EXPERIMENT,
-                    [*OVERRIDES, "runtime.slurm.host=other-host"],
+                    [*self.overrides, "runtime.slurm.host=other-host"],
                 )
 
     def test_staged_digest_matches_the_runtime_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             controller = self._controller(root)
-            record = controller._stage(EXPERIMENT, OVERRIDES)
-            self.assertEqual(record["controller_version"], "1")
+            record = controller._stage(EXPERIMENT, self.overrides)
+            self.assertEqual(record["schema_version"], 2)
+            self.assertEqual(record["controller_version"], "2")
             self.assertEqual(record["pi_extension_version"], "1")
             control = root / "runs" / record["run_id"] / "control"
             resolved = OmegaConf.load(control / "resolved-config.yaml")
@@ -255,24 +297,33 @@ class ExpctlControllerTests(unittest.TestCase):
     def test_generated_job_uses_the_configuration_free_bootstrap(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            record = self._controller(root)._stage(EXPERIMENT, OVERRIDES)
-            script = (
-                root / "runs" / record["run_id"] / "control" / "job.sbatch"
-            ).read_text()
+            record = self._controller(root)._stage(EXPERIMENT, self.overrides)
+            control = root / "runs" / record["run_id"] / "control"
+            script = (control / "job.sbatch").read_text()
+            with tarfile.open(control / "source.tar.gz") as archive:
+                snapshot_paths = set(archive.getnames())
+        self.assertIn("src/dscnet/__main__.py", snapshot_paths)
+        self.assertIn("scripts/run_slurm.sh", snapshot_paths)
+        self.assertIn("uv.lock", snapshot_paths)
+        self.assertIn("pyproject.toml", snapshot_paths)
         self.assertIn("export DSCNET_RESOLVED_CONFIG=", script)
         self.assertIn("export DSCNET_SOURCE_ROOT=", script)
-        self.assertIn("/run_models.sbatch", script)
+        self.assertIn("/scripts/run_slurm.sh", script)
         self.assertIn("--latest-checkpoint", script)
-        self.assertNotIn("S0_Main.py", script)
+        self.assertIn("/home/a/andrewsq/data/urop/environments/", script)
+        self.assertIn("environment-validate --environment-id", script)
+        self.assertIn(" || exit $?", script)
+        self.assertNotIn("DSCNetEnv", script)
+        self.assertNotIn("workflow.py", script)
 
     def test_resource_and_path_allowlists_fail_closed(self):
         cases = {
-            "Slurm account": [*OVERRIDES, "runtime.slurm.account=untrusted"],
-            "memory": [*OVERRIDES, "runtime.slurm.memory_gb=33"],
-            "GPU": [*OVERRIDES, "runtime.slurm.gpus=2"],
-            "partition": [*OVERRIDES, "runtime.slurm.partition=other"],
+            "Slurm account": [*self.overrides, "runtime.slurm.account=untrusted"],
+            "memory": [*self.overrides, "runtime.slurm.memory_gb=33"],
+            "GPU": [*self.overrides, "runtime.slurm.gpus=2"],
+            "partition": [*self.overrides, "runtime.slurm.partition=other"],
             "remote experiment root": [
-                *OVERRIDES,
+                *self.overrides,
                 "runtime.remote_experiment_root=/tmp/experiments",
             ],
         }
@@ -288,8 +339,8 @@ class ExpctlControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             transport = FakeTransport()
             controller = self._controller(Path(directory), transport)
-            first = controller.submit(EXPERIMENT, OVERRIDES)
-            second = controller.submit(EXPERIMENT, OVERRIDES)
+            first = controller.submit(EXPERIMENT, self.overrides)
+            second = controller.submit(EXPERIMENT, self.overrides)
 
         self.assertEqual(first["job_id"], "12345")
         self.assertEqual(second["job_id"], first["job_id"])
@@ -303,8 +354,8 @@ class ExpctlControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             transport = FakeTransport()
             controller = self._controller(Path(directory), transport)
-            first = controller.submit(EXPERIMENT, OVERRIDES)
-            retried = controller.submit(EXPERIMENT, OVERRIDES, retry=True)
+            first = controller.submit(EXPERIMENT, self.overrides)
+            retried = controller.submit(EXPERIMENT, self.overrides, retry=True)
 
         self.assertEqual(retried["run_id"], first["run_id"] + "-a2")
         self.assertEqual(retried["attempt"], 2)
@@ -323,15 +374,68 @@ class ExpctlControllerTests(unittest.TestCase):
             transport = AmbiguousTransport()
             controller = self._controller(Path(directory), transport)
             with self.assertRaisesRegex(ExpctlError, "connection closed"):
-                controller.submit(EXPERIMENT, OVERRIDES)
-            recovered = controller.submit(EXPERIMENT, OVERRIDES)
+                controller.submit(EXPERIMENT, self.overrides)
+            recovered = controller.submit(EXPERIMENT, self.overrides)
         self.assertEqual(recovered["job_id"], "12345")
         self.assertEqual(transport.submit_count, 2)
         self.assertEqual(
             sum(call[0] == "sync" for call in transport.calls),
-            1,
-            "ambiguous recovery must not mutate remote control evidence",
+            2,
+            "ambiguous recovery must not repeat remote synchronization",
         )
+
+    def test_environment_evidence_is_exactly_lock_keyed(self):
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "expctl.REPO_ROOT", Path(directory)
+        ):
+            lock = Path(directory) / "uv.lock"
+            lock.write_bytes(b"first lock")
+            first = _environment_lock()
+            lock.write_bytes(b"second lock")
+            second = _environment_lock()
+        self.assertEqual(
+            set(first),
+            {"kind", "uv_lock_sha256", "environment_id", "environment_path"},
+        )
+        self.assertEqual(first["environment_id"], first["uv_lock_sha256"])
+        self.assertEqual(
+            first["environment_path"],
+            "/home/a/andrewsq/data/urop/environments/" + first["environment_id"],
+        )
+        self.assertNotEqual(first["environment_id"], second["environment_id"])
+
+    def test_building_environment_adds_dependency_and_retry_propagates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            transport.environment_status = "BUILDING"
+            transport.environment_job_id = "777"
+            controller = self._controller(Path(directory), transport)
+            first = controller.submit(EXPERIMENT, self.overrides)
+            retried = controller.submit(EXPERIMENT, self.overrides, retry=True)
+        self.assertEqual(first["environment_status"], "BUILDING")
+        self.assertEqual(first["environment_job_id"], "777")
+        ensure_calls = [
+            item[2] for item in transport.calls
+            if item[0] == "ssh" and "environment-ensure" in item[2]
+        ]
+        self.assertNotIn("--retry", ensure_calls[0])
+        self.assertIn("--retry", ensure_calls[1])
+        submit_calls = [
+            item[2] for item in transport.calls
+            if item[0] == "ssh" and "submit" in item[2]
+        ]
+        self.assertTrue(all("--dependency-job-id" in item for item in submit_calls))
+        self.assertEqual(retried["environment_path"], first["environment_path"])
+
+    def test_ready_environment_submits_without_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transport = FakeTransport()
+            self._controller(Path(directory), transport).submit(EXPERIMENT, self.overrides)
+        submit = next(
+            item[2] for item in transport.calls
+            if item[0] == "ssh" and "submit" in item[2]
+        )
+        self.assertNotIn("--dependency-job-id", submit)
 
     def test_normalization_bytes_change_experiment_identity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -339,7 +443,7 @@ class ExpctlControllerTests(unittest.TestCase):
             mean_std = root / "Mean_Std.npy"
             mean_std.write_bytes(b"first")
             overrides = [
-                *OVERRIDES,
+                *self.overrides,
                 "action=train",
                 f"data.Meanstd_path={mean_std}",
             ]
@@ -360,7 +464,7 @@ class ExpctlControllerTests(unittest.TestCase):
             mean_std = root / "Mean_Std.npy"
             mean_std.write_bytes(b"normalization")
             common = [
-                *OVERRIDES,
+                *self.overrides,
                 "action=train",
                 f"data.Meanstd_path={mean_std}",
                 f"data.Dir_Weights={weights}",
@@ -408,7 +512,7 @@ class ExpctlControllerTests(unittest.TestCase):
             mean_std = root / "Mean_Std.npy"
             mean_std.write_bytes(b"normalization")
             overrides = [
-                *OVERRIDES,
+                *self.overrides,
                 "action=evaluate",
                 f"data.Meanstd_path={mean_std}",
                 f"data.Dir_Weights={weights}",
@@ -439,7 +543,7 @@ class ExpctlControllerTests(unittest.TestCase):
             transport = MismatchTransport()
             controller = self._controller(Path(directory), transport)
             with self.assertRaisesRegex(ExpctlError, "digest does not match"):
-                controller.submit(EXPERIMENT, OVERRIDES)
+                controller.submit(EXPERIMENT, self.overrides)
         self.assertEqual(transport.submit_count, 0)
 
     def test_submission_failure_is_recorded(self):
@@ -449,9 +553,9 @@ class ExpctlControllerTests(unittest.TestCase):
             root = Path(directory)
             controller = self._controller(root, transport)
             with self.assertRaisesRegex(ExpctlError, "invalid account"):
-                controller.submit(EXPERIMENT, OVERRIDES)
+                controller.submit(EXPERIMENT, self.overrides)
             with self.assertRaisesRegex(ExpctlError, "use --retry"):
-                controller.submit(EXPERIMENT, OVERRIDES)
+                controller.submit(EXPERIMENT, self.overrides)
             records = list((root / "runs").glob("*/control/run-manifest.json"))
             record = json.loads(records[0].read_text())
         self.assertEqual(record["state"], "submission_rejected")
@@ -461,7 +565,7 @@ class ExpctlControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             transport = FakeTransport()
             controller = self._controller(Path(directory), transport)
-            record = controller.submit(EXPERIMENT, OVERRIDES)
+            record = controller.submit(EXPERIMENT, self.overrides)
             self.assertEqual(controller.status(record["run_id"])["state"], "COMPLETED")
             self.assertEqual(controller.logs(record["run_id"])["logs"], {})
             self.assertEqual(
@@ -475,32 +579,59 @@ class ExpctlControllerTests(unittest.TestCase):
             transport = FakeTransport()
             root = Path(directory)
             controller = self._controller(root, transport)
-            record = controller._stage(EXPERIMENT, OVERRIDES)
+            record = controller._stage(EXPERIMENT, self.overrides)
             path = root / "runs" / record["run_id"] / "control" / "run-manifest.json"
             original = json.loads(path.read_text())
-            cases = {
-                "run_id": "f" * 16,
-                "host": "attacker.example",
-                "account": "untrusted",
-                "remote_root": "/tmp/escape",
-                "remote_run_dir": "/tmp/escape",
-            }
-            for field, value in cases.items():
+            cases = [
+                ("run_id", "f" * 16),
+                ("host", "attacker.example"),
+                ("account", "untrusted"),
+                ("remote_root", "/tmp/escape"),
+                ("remote_run_dir", "/tmp/escape"),
+                ("environment_path", "/tmp/escape"),
+                ("environment_job_id", "999"),
+                ("schema_version", 1),
+                ("schema_version", 3),
+                ("schema_version", None),
+            ]
+            for field, value in cases:
                 tampered = dict(original)
                 tampered[field] = value
                 path.write_text(json.dumps(tampered))
                 with self.subTest(field=field):
                     with self.assertRaisesRegex(ExpctlError, "recorded"):
-                        controller.submit(EXPERIMENT, OVERRIDES)
+                        controller.submit(EXPERIMENT, self.overrides)
                     self.assertEqual(transport.calls, [])
                 path.write_text(json.dumps(original))
+            downgraded = dict(original)
+            downgraded["schema_version"] = 1
+            downgraded["controller_version"] = "1"
+            for field in (
+                "environment_path", "environment_status", "environment_job_id"
+            ):
+                downgraded.pop(field)
+            path.write_text(json.dumps(downgraded))
+            with self.assertRaisesRegex(ExpctlError, "legacy run manifest"):
+                controller._record(record["run_id"])
+            legacy = dict(original)
+            legacy["schema_version"] = 1
+            legacy["controller_version"] = "1"
+            for field in (
+                "environment",
+                "environment_path",
+                "environment_status",
+                "environment_job_id",
+            ):
+                legacy.pop(field)
+            path.write_text(json.dumps(legacy))
+            self.assertEqual(controller._record(record["run_id"])[1], legacy)
 
     def test_run_operations_reject_tampered_local_routing(self):
         with tempfile.TemporaryDirectory() as directory:
             transport = FakeTransport()
             root = Path(directory)
             controller = self._controller(root, transport)
-            record = controller.submit(EXPERIMENT, OVERRIDES)
+            record = controller.submit(EXPERIMENT, self.overrides)
             path = root / "runs" / record["run_id"] / "control" / "run-manifest.json"
             original = json.loads(path.read_text())
             cases = {
@@ -698,7 +829,7 @@ class ExpctlControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             transport = FakeTransport()
             controller = self._controller(Path(directory), transport)
-            record = controller.submit(EXPERIMENT, OVERRIDES)
+            record = controller.submit(EXPERIMENT, self.overrides)
             payloads = {
                 "control/resolved-config.yaml": b"action: prepare\n",
                 "control/dataset-manifest.json": b"{}\n",
@@ -747,7 +878,7 @@ class ExpctlControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             transport = FakeTransport()
             controller = self._controller(Path(directory), transport)
-            record = controller.submit(EXPERIMENT, OVERRIDES)
+            record = controller.submit(EXPERIMENT, self.overrides)
             artifacts = [
                 {"path": path, "sha256": "0" * 64, "size": 1}
                 for path in (
@@ -775,7 +906,7 @@ class ExpctlControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             transport = FakeTransport()
             controller = self._controller(Path(directory), transport)
-            record = controller.submit(EXPERIMENT, OVERRIDES)
+            record = controller.submit(EXPERIMENT, self.overrides)
             transport.remote_files = {
                 "control/artifacts.json": json.dumps(
                     {

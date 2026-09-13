@@ -1,21 +1,10 @@
 import math
-import sys
 import unittest
 from pathlib import Path
 
 import torch
 
-MODULE_DIR = (
-    Path(__file__).parents[1]
-    / "DSCNet_3D_opensource"
-    / "Code"
-    / "Kipa"
-    / "DSCNet"
-)
-sys.path.insert(0, str(MODULE_DIR))
-
-from S3_Loss import categorical_entropy, entropy_loss
-
+from dscnet.training.losses import categorical_entropy, entropy_loss
 
 class CategoricalEntropyTests(unittest.TestCase):
     def test_uniform_two_class_distribution_is_log_two(self):
@@ -42,7 +31,6 @@ class CategoricalEntropyTests(unittest.TestCase):
         self.assertAlmostEqual(
             module(probabilities, epoch=1).item(), math.log(2), places=6
         )
-
 
 if __name__ == "__main__":
     unittest.main()

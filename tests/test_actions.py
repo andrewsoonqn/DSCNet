@@ -4,23 +4,14 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
 
-MODULE_DIR = (
-    Path(__file__).parents[1]
-    / "DSCNet_3D_opensource"
-    / "Code"
-    / "Kipa"
-    / "DSCNet"
-)
-sys.path.insert(0, str(MODULE_DIR))
-
-import S0_Main
-
+from dscnet import workflow
 
 class ActionDispatchTests(unittest.TestCase):
     def _prepared_args(self, root, action):
@@ -53,7 +44,7 @@ class ActionDispatchTests(unittest.TestCase):
         )
 
     def _pipeline(self):
-        pipeline = types.ModuleType("S3_Train_Process")
+        pipeline = types.ModuleType("dscnet.training.standard")
         pipeline.Train = Mock()
         pipeline.Evaluate = Mock()
         return pipeline
@@ -66,9 +57,9 @@ class ActionDispatchTests(unittest.TestCase):
                 torch.rand(4),
             )
 
-        S0_Main.apply_reproducibility(2026, True)
+        workflow.apply_reproducibility(2026, True)
         first = sample()
-        S0_Main.apply_reproducibility(2026, True)
+        workflow.apply_reproducibility(2026, True)
         second = sample()
         self.assertEqual(first[:2], second[:2])
         torch.testing.assert_close(first[2], second[2], rtol=0, atol=0)
@@ -78,18 +69,18 @@ class ActionDispatchTests(unittest.TestCase):
             args = self._prepared_args(Path(directory), "train")
             del args.config_digest
             with self.assertRaisesRegex(RuntimeError, "Hydra experiment digest"):
-                S0_Main.Process(args)
+                workflow.Process(args)
 
     def test_train_does_not_evaluate_test_set(self):
         with tempfile.TemporaryDirectory() as directory:
             args = self._prepared_args(Path(directory), "train")
             pipeline = self._pipeline()
-            with patch.object(S0_Main, "Create_files"), patch.object(
-                S0_Main, "apply_reproducibility"
+            with patch.object(workflow, "Create_files"), patch.object(
+                workflow, "apply_reproducibility"
             ) as reproducibility, patch.dict(
-                sys.modules, {"S3_Train_Process": pipeline}
+                sys.modules, {"dscnet.training.standard": pipeline}
             ):
-                S0_Main.Process(args)
+                workflow.Process(args)
 
             reproducibility.assert_called_once_with(2026, True)
             pipeline.Train.assert_called_once_with(args)
@@ -99,20 +90,20 @@ class ActionDispatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             args = self._prepared_args(Path(directory), "evaluate")
             pipeline = self._pipeline()
-            forbidden_preparation = types.ModuleType("S1_Pre_Getmeanstd")
+            forbidden_preparation = types.ModuleType("dscnet.data.normalization")
             forbidden_preparation.Getmeanstd = Mock(
                 side_effect=AssertionError("evaluation attempted preprocessing")
             )
-            with patch.object(S0_Main, "Create_files"), patch.object(
-                S0_Main, "apply_reproducibility"
+            with patch.object(workflow, "Create_files"), patch.object(
+                workflow, "apply_reproducibility"
             ), patch.dict(
                 sys.modules,
                 {
-                    "S3_Train_Process": pipeline,
-                    "S1_Pre_Getmeanstd": forbidden_preparation,
+                    "dscnet.training.standard": pipeline,
+                    "dscnet.data.normalization": forbidden_preparation,
                 },
             ):
-                S0_Main.Process(args)
+                workflow.Process(args)
 
             pipeline.Evaluate.assert_called_once_with(args)
             pipeline.Train.assert_not_called()
@@ -122,12 +113,11 @@ class ActionDispatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             args = self._prepared_args(Path(directory), "evaluate")
             Path(args.Meanstd_path).unlink()
-            with patch.object(S0_Main, "Create_files"), patch.object(
-                S0_Main, "apply_reproducibility"
+            with patch.object(workflow, "Create_files"), patch.object(
+                workflow, "apply_reproducibility"
             ):
                 with self.assertRaisesRegex(FileNotFoundError, "evaluation requires"):
-                    S0_Main.Process(args)
-
+                    workflow.Process(args)
 
 if __name__ == "__main__":
     unittest.main()

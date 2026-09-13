@@ -15,7 +15,6 @@ sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 import expctl_remote
 
-
 class ExpctlRemoteTests(unittest.TestCase):
     def _completed(self, code=0, stdout="", stderr=""):
         return subprocess.CompletedProcess([], code, stdout, stderr)
@@ -190,11 +189,360 @@ class ExpctlRemoteTests(unittest.TestCase):
             )
         self.assertEqual(result["dataset_digest"], expected)
 
+    def test_ready_environment_requires_private_matching_complete_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment_id = "a" * 64
+            environment = root / environment_id
+            python = environment / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_text("#!/bin/sh\n")
+            python.chmod(0o700)
+            control = root / ".control" / environment_id
+            control.mkdir(parents=True)
+            ready = {
+                "schema_version": 1,
+                "kind": "uv-lock",
+                "uv_lock_sha256": environment_id,
+                "environment_id": environment_id,
+                "environment_path": str(environment),
+                "system": "Linux",
+                "machine": "x86_64",
+                "python_version": "3.12.9",
+                "package_check": "passed",
+            }
+            for path in (control / "ready.json", environment / ".dscnet-ready.json"):
+                path.write_text(json.dumps(ready))
+                path.chmod(0o600)
+            with patch.object(expctl_remote, "ENVIRONMENT_ROOT", root):
+                self.assertEqual(
+                    expctl_remote._valid_environment_ready(environment_id, environment),
+                    ready,
+                )
+                (control / "ready.json").chmod(0o644)
+                self.assertIsNone(
+                    expctl_remote._valid_environment_ready(environment_id, environment)
+                )
+                (control / "ready.json").chmod(0o600)
+                python.chmod(0o600)
+                self.assertIsNone(
+                    expctl_remote._valid_environment_ready(environment_id, environment)
+                )
+                python.chmod(0o700)
+                published = environment / ".dscnet-ready.json"
+                published.unlink()
+                published.symlink_to(control / "ready.json")
+                self.assertIsNone(
+                    expctl_remote._valid_environment_ready(environment_id, environment)
+                )
+
+    def test_environment_ensure_submits_one_fixed_cpu_atomic_builder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            source = base / "checkout"
+            source.mkdir()
+            lock = source / "uv.lock"
+            lock.write_bytes(b"lock")
+            (source / "tools").mkdir()
+            (source / "tools" / "expctl_remote.py").write_text("# helper\n")
+            digest = hashlib.sha256(b"lock").hexdigest()
+            environments = base / "environments"
+            experiments = base / "experiments"
+            experiments.mkdir()
+            arguments = argparse.Namespace(
+                source_root=str(source), uv_lock_sha256=digest,
+                account="test-account", retry=False,
+            )
+            with patch.multiple(
+                expctl_remote,
+                ALLOWED_REMOTE_CHECKOUT=source,
+                ALLOWED_EXPERIMENT_ROOT=experiments,
+                ENVIRONMENT_ROOT=environments,
+                TRUSTED_ACCOUNTS=frozenset({"test-account"}),
+            ), patch.dict(os.environ, {"USER": "tester"}), patch(
+                "expctl_remote.subprocess.run",
+                side_effect=[
+                    self._completed(stdout="456;cluster\n"),
+                    self._completed(stdout="PENDING\n"),
+                ],
+            ) as command:
+                first = expctl_remote.environment_ensure(arguments)
+                second = expctl_remote.environment_ensure(arguments)
+                script = (environments / ".control" / digest / "setup.sbatch").read_text()
+        self.assertEqual(first["status"], "BUILDING")
+        self.assertEqual(second, first)
+        self.assertEqual(command.call_count, 2)
+        self.assertIn("#SBATCH --partition=normal", script)
+        self.assertIn("#SBATCH --cpus-per-task=2", script)
+        self.assertIn("#SBATCH --mem=16G", script)
+        self.assertIn("#SBATCH --time=1:00:00", script)
+        self.assertNotIn("gpu", script.lower())
+        self.assertIn("umask 077", script)
+        self.assertIn("environment-build", script)
+        self.assertIn("UV_CACHE_DIR", script)
+        self.assertIn("trap 'rm -rf -- \"$TMPDIR\"' EXIT", script)
+        self.assertNotIn("exec /usr/bin/python3", script)
+
+    def test_failed_environment_setup_requires_explicit_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            source = base / "checkout"
+            source.mkdir()
+            (source / "uv.lock").write_bytes(b"lock")
+            digest = hashlib.sha256(b"lock").hexdigest()
+            environments = base / "environments"
+            control = environments / ".control" / digest
+            control.mkdir(parents=True)
+            receipt = control / "submission.json"
+            receipt.write_text(
+                json.dumps(
+                    {
+                        "status": "submitted",
+                        "job_id": "456",
+                        "marker": f"expctl-env:{digest}",
+                    }
+                )
+            )
+            receipt.chmod(0o600)
+            arguments = argparse.Namespace(
+                source_root=str(source), uv_lock_sha256=digest,
+                account="test-account", retry=False,
+            )
+            with patch.multiple(
+                expctl_remote,
+                ALLOWED_REMOTE_CHECKOUT=source,
+                ENVIRONMENT_ROOT=environments,
+                TRUSTED_ACCOUNTS=frozenset({"test-account"}),
+            ), patch("expctl_remote._environment_job_state", return_value="FAILED"):
+                with self.assertRaisesRegex(RuntimeError, "retry explicitly"):
+                    expctl_remote.environment_ensure(arguments)
+                arguments.retry = True
+                with patch(
+                    "expctl_remote.subprocess.run",
+                    return_value=self._completed(stdout="789\n"),
+                ):
+                    retried = expctl_remote.environment_ensure(arguments)
+        self.assertEqual(retried["status"], "BUILDING")
+        self.assertEqual(retried["job_id"], "789")
+
+    def test_retry_does_not_duplicate_less_common_nonterminal_setup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            source = base / "checkout"
+            source.mkdir()
+            (source / "uv.lock").write_bytes(b"lock")
+            digest = hashlib.sha256(b"lock").hexdigest()
+            environments = base / "environments"
+            control = environments / ".control" / digest
+            control.mkdir(parents=True)
+            receipt = control / "submission.json"
+            receipt.write_text(
+                json.dumps(
+                    {
+                        "status": "submitted",
+                        "job_id": "456",
+                        "marker": f"expctl-env:{digest}",
+                    }
+                )
+            )
+            receipt.chmod(0o600)
+            arguments = argparse.Namespace(
+                source_root=str(source), uv_lock_sha256=digest,
+                account="test-account", retry=True,
+            )
+            with patch.multiple(
+                expctl_remote,
+                ALLOWED_REMOTE_CHECKOUT=source,
+                ENVIRONMENT_ROOT=environments,
+                TRUSTED_ACCOUNTS=frozenset({"test-account"}),
+            ), patch(
+                "expctl_remote._environment_job_state", return_value="REQUEUE_HOLD"
+            ), patch("expctl_remote.subprocess.run") as submit:
+                result = expctl_remote.environment_ensure(arguments)
+        self.assertEqual(result["status"], "BUILDING")
+        self.assertEqual(result["job_id"], "456")
+        submit.assert_not_called()
+
+    def test_unknown_setup_job_requires_retry_and_can_be_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            source = base / "checkout"
+            source.mkdir()
+            (source / "uv.lock").write_bytes(b"lock")
+            digest = hashlib.sha256(b"lock").hexdigest()
+            environments = base / "environments"
+            control = environments / ".control" / digest
+            control.mkdir(parents=True)
+            for name, payload in (
+                (
+                    "submission.json",
+                    {
+                        "status": "submitted",
+                        "job_id": "456",
+                        "marker": f"expctl-env:{digest}",
+                    },
+                ),
+                ("failure.json", {"status": "failed"}),
+            ):
+                path = control / name
+                path.write_text(json.dumps(payload))
+                path.chmod(0o600)
+            arguments = argparse.Namespace(
+                source_root=str(source), uv_lock_sha256=digest,
+                account="test-account", retry=False,
+            )
+            with patch.multiple(
+                expctl_remote,
+                ALLOWED_REMOTE_CHECKOUT=source,
+                ENVIRONMENT_ROOT=environments,
+                TRUSTED_ACCOUNTS=frozenset({"test-account"}),
+            ), patch("expctl_remote._environment_job_state", return_value="UNKNOWN"):
+                with self.assertRaisesRegex(RuntimeError, "no longer visible"):
+                    expctl_remote.environment_ensure(arguments)
+                arguments.retry = True
+                with patch(
+                    "expctl_remote.subprocess.run",
+                    return_value=self._completed(stdout="789\n"),
+                ):
+                    retried = expctl_remote.environment_ensure(arguments)
+        self.assertEqual(retried["status"], "BUILDING")
+        self.assertEqual(retried["job_id"], "789")
+
+    def test_environment_ensure_rejects_malformed_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            source = base / "checkout"
+            source.mkdir()
+            (source / "uv.lock").write_bytes(b"lock")
+            digest = hashlib.sha256(b"lock").hexdigest()
+            environments = base / "environments"
+            control = environments / ".control" / digest
+            control.mkdir(parents=True)
+            receipt = control / "submission.json"
+            receipt.write_text(json.dumps({"job_id": "../../unrelated"}))
+            receipt.chmod(0o600)
+            arguments = argparse.Namespace(
+                source_root=str(source), uv_lock_sha256=digest,
+                account="test-account", retry=False,
+            )
+            with patch.multiple(
+                expctl_remote,
+                ALLOWED_REMOTE_CHECKOUT=source,
+                ENVIRONMENT_ROOT=environments,
+                TRUSTED_ACCOUNTS=frozenset({"test-account"}),
+            ), self.assertRaisesRegex(RuntimeError, "receipt is invalid"):
+                expctl_remote.environment_ensure(arguments)
+
+    def test_environment_build_cleans_ready_evidence_if_publish_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            source = base / "checkout"
+            source.mkdir()
+            (source / "uv.lock").write_bytes(b"lock")
+            digest = hashlib.sha256(b"lock").hexdigest()
+            environments = base / "environments"
+            final = environments / digest
+            real_replace = os.replace
+
+            def command(argv, **kwargs):
+                if "sync" in argv:
+                    stage = Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"])
+                    python = stage / "bin" / "python"
+                    python.parent.mkdir(parents=True)
+                    python.write_text("#!/bin/sh\n")
+                    python.chmod(0o700)
+                    return self._completed()
+                if argv[-2:] == ["-c", argv[-1]]:
+                    return self._completed(
+                        stdout=json.dumps(
+                            {
+                                "python_version": "3.12.9",
+                                "system": "Linux",
+                                "machine": "x86_64",
+                            }
+                        )
+                    )
+                return self._completed()
+
+            def replace(source_path, destination_path):
+                if Path(destination_path) == final:
+                    raise OSError("publish failed")
+                return real_replace(source_path, destination_path)
+
+            arguments = argparse.Namespace(
+                source_root=str(source), uv_lock_sha256=digest,
+            )
+            with patch.multiple(
+                expctl_remote,
+                ALLOWED_REMOTE_CHECKOUT=source,
+                ENVIRONMENT_ROOT=environments,
+            ), patch.dict(
+                os.environ,
+                {"SLURM_JOB_ID": "123", "SLURM_JOB_PARTITION": "normal"},
+            ), patch(
+                "expctl_remote.subprocess.run", side_effect=command
+            ), patch("expctl_remote.os.replace", side_effect=replace):
+                with self.assertRaisesRegex(OSError, "publish failed"):
+                    expctl_remote.environment_build(arguments)
+            control = environments / ".control" / digest
+            self.assertFalse(final.exists())
+            self.assertFalse((control / "ready.json").exists())
+            self.assertTrue((control / "failure.json").is_file())
+            self.assertFalse(any(environments.glob(f".{digest}.build-*")))
+
+    def test_environment_build_rejects_login_node_execution(self):
+        with patch.dict(os.environ, {}, clear=True), self.assertRaisesRegex(
+            RuntimeError, "allowlisted Slurm job"
+        ):
+            expctl_remote.environment_build(
+                argparse.Namespace(source_root="/tmp", uv_lock_sha256="a" * 64)
+            )
+
+    def test_submit_persists_optional_afterok_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / "runs" / "abc"
+            (run / "control").mkdir(parents=True)
+            (run / "control" / "job.sbatch").write_text("#!/bin/sh\n")
+            arguments = argparse.Namespace(
+                run_dir=str(run), remote_root=str(root), account="test-account",
+                dependency_job_id="777",
+            )
+            with patch(
+                "expctl_remote.subprocess.run",
+                side_effect=[self._completed(), self._completed(stdout="12345\n")],
+            ) as command:
+                record = expctl_remote.submit(arguments)
+                receipt = json.loads((run / "control" / "submission.json").read_text())
+        submit_command = command.call_args_list[1].args[0]
+        self.assertIn("afterok:777", submit_command)
+        self.assertEqual(record["dependency_job_id"], "777")
+        self.assertEqual(receipt["dependency_job_id"], "777")
+
+    def test_ui_start_rejects_environment_without_ready_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            args = argparse.Namespace(
+                experiment_root=str(root), tracking_uri="sqlite:///test.db",
+                artifact_root=str(root / "artifacts"), environment_id="a" * 64,
+                port=5000, timeout_minutes=60,
+            )
+            with patch.multiple(
+                expctl_remote,
+                ALLOWED_EXPERIMENT_ROOT=root,
+                ALLOWED_MLFLOW_URI="sqlite:///test.db",
+                ALLOWED_ARTIFACT_ROOT=root / "artifacts",
+                ENVIRONMENT_ROOT=root / "environments",
+            ):
+                with self.assertRaisesRegex(RuntimeError, "environment is not ready"):
+                    expctl_remote.ui_start(args)
+
     def test_ui_start_is_localhost_only_bounded_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             artifact_root = root / "mlflow-artifacts"
-            python = root / "python"
+            environment_id = "a" * 64
+            python = root / environment_id / "bin" / "python"
             process = Mock(pid=1234)
             process.poll.return_value = None
             probe = MagicMock()
@@ -204,7 +552,7 @@ class ExpctlRemoteTests(unittest.TestCase):
                 experiment_root=str(root),
                 tracking_uri="sqlite:///test.db",
                 artifact_root=str(artifact_root),
-                python=str(python),
+                environment_id=environment_id,
                 port=5000,
                 timeout_minutes=60,
             )
@@ -213,8 +561,8 @@ class ExpctlRemoteTests(unittest.TestCase):
                 ALLOWED_EXPERIMENT_ROOT=root,
                 ALLOWED_MLFLOW_URI="sqlite:///test.db",
                 ALLOWED_ARTIFACT_ROOT=artifact_root,
-                ALLOWED_PYTHON=python,
-            ), patch("expctl_remote.socket.socket", return_value=probe), patch(
+                ENVIRONMENT_ROOT=root,
+            ), patch("expctl_remote._valid_environment_ready", return_value={"status": "ready"}), patch("expctl_remote.socket.socket", return_value=probe), patch(
                 "expctl_remote.subprocess.Popen", return_value=process
             ) as launch, patch(
                 "expctl_remote._linux_process_identity", return_value=("boot", "ticks")
@@ -236,6 +584,55 @@ class ExpctlRemoteTests(unittest.TestCase):
         self.assertEqual(started["username"], "dscnet-ui")
         self.assertRegex(started["password"], r"^[A-Za-z0-9_-]{40,64}$")
         self.assertIn("60m", command)
+
+    def test_ui_start_replaces_a_running_old_lock_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            artifact_root = root / "mlflow-artifacts"
+            probe = MagicMock()
+            probe.__enter__.return_value = probe
+            probe.connect_ex.side_effect = [1, 0, 1, 0]
+            first_process = Mock(pid=1234)
+            first_process.poll.return_value = None
+            second_process = Mock(pid=5678)
+            second_process.poll.return_value = None
+
+            def arguments(environment_id):
+                return argparse.Namespace(
+                    experiment_root=str(root),
+                    tracking_uri="sqlite:///test.db",
+                    artifact_root=str(artifact_root),
+                    environment_id=environment_id,
+                    port=5000,
+                    timeout_minutes=60,
+                )
+
+            with patch.multiple(
+                expctl_remote,
+                ALLOWED_EXPERIMENT_ROOT=root,
+                ALLOWED_MLFLOW_URI="sqlite:///test.db",
+                ALLOWED_ARTIFACT_ROOT=artifact_root,
+                ENVIRONMENT_ROOT=root,
+            ), patch(
+                "expctl_remote._valid_environment_ready", return_value={"status": "ready"}
+            ), patch(
+                "expctl_remote.socket.socket", return_value=probe
+            ), patch(
+                "expctl_remote.subprocess.Popen",
+                side_effect=[first_process, second_process],
+            ) as launch, patch(
+                "expctl_remote._linux_process_identity", return_value=("boot", "ticks")
+            ), patch(
+                "expctl_remote._ui_process_matches", return_value=True
+            ), patch(
+                "expctl_remote._stop_ui_process", return_value=True
+            ) as stop:
+                first = expctl_remote.ui_start(arguments("a" * 64))
+                second = expctl_remote.ui_start(arguments("b" * 64))
+        self.assertEqual(first["environment_id"], "a" * 64)
+        self.assertEqual(second["environment_id"], "b" * 64)
+        self.assertEqual(launch.call_count, 2)
+        stop.assert_called_once()
 
     def test_ui_auth_uses_private_persistent_random_credentials(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -267,7 +664,8 @@ class ExpctlRemoteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             artifact_root = root / "mlflow-artifacts"
-            python = root / "python"
+            environment_id = "a" * 64
+            python = root / environment_id / "bin" / "python"
             process = Mock(pid=1234)
             process.poll.return_value = None
             probe = MagicMock()
@@ -277,7 +675,7 @@ class ExpctlRemoteTests(unittest.TestCase):
                 experiment_root=str(root),
                 tracking_uri="sqlite:///test.db",
                 artifact_root=str(artifact_root),
-                python=str(python),
+                environment_id=environment_id,
                 port=5000,
                 timeout_minutes=60,
             )
@@ -286,8 +684,8 @@ class ExpctlRemoteTests(unittest.TestCase):
                 ALLOWED_EXPERIMENT_ROOT=root,
                 ALLOWED_MLFLOW_URI="sqlite:///test.db",
                 ALLOWED_ARTIFACT_ROOT=artifact_root,
-                ALLOWED_PYTHON=python,
-            ), patch("expctl_remote.socket.socket", return_value=probe), patch(
+                ENVIRONMENT_ROOT=root,
+            ), patch("expctl_remote._valid_environment_ready", return_value={"status": "ready"}), patch("expctl_remote.socket.socket", return_value=probe), patch(
                 "expctl_remote.subprocess.Popen", return_value=process
             ), patch(
                 "expctl_remote._linux_process_identity", return_value=("boot", "ticks")
@@ -475,7 +873,6 @@ class ExpctlRemoteTests(unittest.TestCase):
         self.assertIn("outputs/weights/model_latest.pth", paths)
         self.assertNotIn("logs/slurm-123.out", paths)
         self.assertNotIn("outputs/predictions/large.nii.gz", paths)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,26 +1,14 @@
-import sys
 import unittest
 from pathlib import Path
 
 import numpy as np
 import torch
 
-MODULE_DIR = (
-    Path(__file__).parents[1]
-    / "DSCNet_3D_opensource"
-    / "Code"
-    / "Kipa"
-    / "DSCNet"
-)
-sys.path.insert(0, str(MODULE_DIR))
-
-from S3_Sliding_Window import axis_starts, sliding_window_logits
-
+from dscnet.evaluation.sliding_window import axis_starts, sliding_window_logits
 
 class TwoClassIdentity(torch.nn.Module):
     def forward(self, image):
         return torch.cat((image, image * 2), dim=1)
-
 
 class NonFiniteModel(torch.nn.Module):
     def forward(self, image):
@@ -29,7 +17,6 @@ class NonFiniteModel(torch.nn.Module):
             float("nan"),
             device=image.device,
         )
-
 
 class SlidingWindowTests(unittest.TestCase):
     def test_axis_starts_snap_to_awkward_far_edge(self):
@@ -77,7 +64,6 @@ class SlidingWindowTests(unittest.TestCase):
                 batch_size=1,
                 device=torch.device("cpu"),
             )
-
 
 if __name__ == "__main__":
     unittest.main()

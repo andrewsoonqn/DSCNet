@@ -1,40 +1,31 @@
 import hashlib
 import json
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import mlflow
 from mlflow import MlflowClient
 
-MODULE_DIR = (
-    Path(__file__).parents[1]
-    / "DSCNet_3D_opensource"
-    / "Code"
-    / "Kipa"
-    / "DSCNet"
-)
 REPO_ROOT = Path(__file__).parents[1]
-sys.path.insert(0, str(MODULE_DIR))
 
-from S4_Experiment_Config import load_experiment_config
-from S4_Experiment_Tracking import (
+from dscnet.experiment.config import load_experiment_config
+from dscnet.experiment.tracking import (
     RunRecorder,
     build_consumed_split_manifest,
     build_dataset_manifest,
     collect_git_provenance,
     experiment_digest,
 )
-from S4_Experiment_Run import (
+from dscnet.experiment.run import (
     _control_evidence,
     _identity_config_yaml,
     run_configured_experiment,
 )
-
 
 class ExperimentTrackingTests(unittest.TestCase):
     def test_runtime_verifies_the_checkpoint_file_evaluation_consumes(self):
@@ -331,7 +322,7 @@ class ExperimentTrackingTests(unittest.TestCase):
                         f"data.Label_{prefix}_txt={label_manifest}",
                     ]
                 )
-            with patch("S4_Experiment_Run.Process", return_value=None) as process:
+            with patch("dscnet.experiment.run.Process", return_value=None) as process:
                 result = run_configured_experiment(overrides=overrides)
 
             args = process.call_args.args[0]
@@ -363,7 +354,6 @@ class ExperimentTrackingTests(unittest.TestCase):
             ) as recorder:
                 with self.assertRaisesRegex(ValueError, "unregistered metric"):
                     recorder.log_metric("dice", 1.0)
-
 
 if __name__ == "__main__":
     unittest.main()

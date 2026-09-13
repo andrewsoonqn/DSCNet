@@ -1,19 +1,8 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-MODULE_DIR = (
-    Path(__file__).parents[1]
-    / "DSCNet_3D_opensource"
-    / "Code"
-    / "Kipa"
-    / "DSCNet"
-)
-sys.path.insert(0, str(MODULE_DIR))
-
-from S2_Pre_Generate_Txt import Generate_Paired_Txt, Generate_Txt, Get_file_list
-
+from dscnet.data.manifests import Generate_Paired_Txt, Generate_Txt, Get_file_list
 
 class ManifestTests(unittest.TestCase):
     def test_lists_only_nifti_files_in_natural_order(self):
@@ -94,7 +83,6 @@ class ManifestTests(unittest.TestCase):
                 Generate_Paired_Txt(
                     images, labels, root / "image.txt", root / "label.txt"
                 )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,32 +1,67 @@
+import json
 import random
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+
 from types import SimpleNamespace
 
 import numpy as np
 import torch
 
-MODULE_DIR = (
-    Path(__file__).parents[1]
-    / "DSCNet_3D_opensource"
-    / "Code"
-    / "Kipa"
-    / "DSCNet"
-)
-sys.path.insert(0, str(MODULE_DIR))
-
-import S3_Train_Process
-from S3_Checkpoint import (
+from dscnet.models.optimized import DSCNet as OptimizedDSCNet
+from dscnet.models.standard import DSCNet as StandardDSCNet
+from dscnet.training import standard as standard_training
+from dscnet.training.checkpoints import (
     load_model_checkpoint,
     load_training_checkpoint,
     save_model_checkpoint,
     save_training_checkpoint,
 )
 
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
 
 class CheckpointCompatibilityTests(unittest.TestCase):
+    def test_dscnet_model_keys_and_checkpoint_metadata_match_legacy_contract(self):
+        models = {
+            "standard": StandardDSCNet(
+                1, 2, 9, 1.0, True, "cpu", 4, 4, unet_layers=4
+            ),
+            "optimized": OptimizedDSCNet(
+                1, 2, 9, 1.0, True, "cpu", 4, 4, epochs=1
+            ),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for pipeline, model in models.items():
+                with self.subTest(pipeline=pipeline):
+                    expected_keys = json.loads(
+                        (
+                            FIXTURE_DIR / f"{pipeline}_state_dict_keys.json"
+                        ).read_text()
+                    )
+                    self.assertEqual(list(model.state_dict()), expected_keys)
+                    path = Path(directory) / f"{pipeline}.pt"
+                    save_model_checkpoint(model, path, pipeline=pipeline)
+                    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+                    self.assertEqual(
+                        list(checkpoint),
+                        [
+                            "format_version",
+                            "sampler_implementation",
+                            "pipeline",
+                            "model_state_dict",
+                        ],
+                    )
+                    self.assertEqual(checkpoint["format_version"], 2)
+                    self.assertEqual(
+                        checkpoint["sampler_implementation"], "grid_sample_v1"
+                    )
+                    self.assertEqual(checkpoint["pipeline"], pipeline)
+                    self.assertEqual(
+                        list(checkpoint["model_state_dict"]), expected_keys
+                    )
+
     def test_current_checkpoint_round_trip(self):
         source = torch.nn.Linear(3, 2)
         target = torch.nn.Linear(3, 2)
@@ -139,7 +174,7 @@ class CheckpointCompatibilityTests(unittest.TestCase):
                 config_digest="digest",
                 loop_state={"dice_max": 0.72, "early_stopping_counter": 5},
             )
-            state = S3_Train_Process._resume_training(
+            state = standard_training._resume_training(
                 target,
                 SimpleNamespace(
                     Dir_Weights=str(root),
@@ -153,7 +188,7 @@ class CheckpointCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(state, (5, 0.7, 0.72, 5))
         self.assertTrue(
-            S3_Train_Process._early_stopping_reached(
+            standard_training._early_stopping_reached(
                 SimpleNamespace(use_earlystop=True, earlystop_patience=5), state[3]
             )
         )
@@ -192,7 +227,6 @@ class CheckpointCompatibilityTests(unittest.TestCase):
             save_model_checkpoint(model, path, pipeline="optimized")
             with self.assertRaisesRegex(RuntimeError, "incompatible checkpoint"):
                 load_model_checkpoint(model, path, pipeline="standard")
-
 
 if __name__ == "__main__":
     unittest.main()

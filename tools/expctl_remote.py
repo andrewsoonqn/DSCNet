@@ -25,12 +25,35 @@ MAX_ARTIFACT_MANIFEST_BYTES = 1024 * 1024
 MAX_AUTO_FILE_BYTES = 8 * 1024**3
 MAX_AUTO_TOTAL_BYTES = 12 * 1024**3
 ALLOWED_EXPERIMENT_ROOT = Path("/home/a/andrewsq/data/urop/experiments")
+ALLOWED_REMOTE_CHECKOUT = Path("/home/a/andrewsq/dev/urop/dscnet")
+ENVIRONMENT_ROOT = Path("/home/a/andrewsq/data/urop/environments")
+ENVIRONMENT_UV = Path("/home/a/andrewsq/.local/bin/uv")
+ENVIRONMENT_BASE_PYTHON = Path("/usr/bin/python3")
+ENVIRONMENT_PARTITION = "normal"
+ENVIRONMENT_CPUS = 2
+ENVIRONMENT_MEMORY = "16G"
+ENVIRONMENT_TIME = "1:00:00"
+TRUSTED_ACCOUNTS = frozenset({"allusers"})
 ALLOWED_MLFLOW_URI = "sqlite:////home/a/andrewsq/data/urop/experiments/mlflow.db"
 ALLOWED_ARTIFACT_ROOT = Path("/home/a/andrewsq/data/urop/experiments/mlflow-artifacts")
-ALLOWED_PYTHON = Path("/home/a/andrewsq/dev/urop/dscnet/DSCNetEnv/bin/python")
 MLFLOW_UI_PORT = 5000
 MAX_UI_TIMEOUT_MINUTES = 480
 MLFLOW_UI_USERNAME = "dscnet-ui"
+ENVIRONMENT_TERMINAL_STATES = frozenset(
+    {
+        "BOOT_FAIL",
+        "CANCELLED",
+        "COMPLETED",
+        "DEADLINE",
+        "FAILED",
+        "NODE_FAIL",
+        "OUT_OF_MEMORY",
+        "PREEMPTED",
+        "REVOKED",
+        "SPECIAL_EXIT",
+        "TIMEOUT",
+    }
+)
 
 
 def _job_id(value: str) -> str:
@@ -126,6 +149,345 @@ def verify_data(args: argparse.Namespace) -> dict:
     return {"status": "verified", "dataset_digest": actual, "splits": splits}
 
 
+def _environment_source(value: str) -> Path:
+    supplied = Path(value).absolute()
+    source = supplied.resolve()
+    if supplied != source or source.is_symlink() or not source.is_dir():
+        raise RuntimeError("environment source path is unsafe")
+    allowed_snapshot = (
+        source.name == "source"
+        and source.parent.parent.parent == ALLOWED_EXPERIMENT_ROOT.resolve()
+        and source.parent.parent.name == "runs"
+        and bool(re.fullmatch(r"[0-9a-f]{16}(?:-a[1-9][0-9]*)?", source.parent.name))
+    )
+    if source != ALLOWED_REMOTE_CHECKOUT.resolve() and not allowed_snapshot:
+        raise RuntimeError("environment source is outside the allowlist")
+    return source
+
+
+def _environment_identity(source: Path, expected: str) -> tuple[str, Path]:
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise RuntimeError("uv.lock SHA-256 is invalid")
+    lock = source / "uv.lock"
+    if lock.is_symlink() or not lock.is_file() or _sha256(lock) != expected:
+        raise RuntimeError("source uv.lock does not match the requested environment")
+    return expected, ENVIRONMENT_ROOT / expected
+
+
+def _environment_control(environment_id: str) -> Path:
+    if ENVIRONMENT_ROOT.is_symlink() or (
+        ENVIRONMENT_ROOT.exists() and not ENVIRONMENT_ROOT.is_dir()
+    ):
+        raise RuntimeError("environment root path is unsafe")
+    ENVIRONMENT_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    control_root = ENVIRONMENT_ROOT / ".control"
+    if control_root.is_symlink() or (
+        control_root.exists() and not control_root.is_dir()
+    ):
+        raise RuntimeError("environment control root path is unsafe")
+    control_root.mkdir(mode=0o700, exist_ok=True)
+    control_root.chmod(0o700)
+    control = control_root / environment_id
+    if control.is_symlink() or (control.exists() and not control.is_dir()):
+        raise RuntimeError("environment control path is unsafe")
+    control.mkdir(mode=0o700, exist_ok=True)
+    control.chmod(0o700)
+    return control
+
+
+def _private_json(path: Path) -> dict | None:
+    try:
+        if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) & 0o077:
+            return None
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _valid_environment_ready(environment_id: str, environment_path: Path) -> dict | None:
+    control_root = ENVIRONMENT_ROOT / ".control"
+    control = control_root / environment_id
+    if (
+        ENVIRONMENT_ROOT.is_symlink()
+        or control_root.is_symlink()
+        or control.is_symlink()
+        or environment_path.is_symlink()
+        or not environment_path.is_dir()
+    ):
+        return None
+    python = environment_path / "bin" / "python"
+    if not python.is_file() or not os.access(python, os.X_OK):
+        return None
+    ready_path = control / "ready.json"
+    ready = _private_json(ready_path)
+    published = _private_json(environment_path / ".dscnet-ready.json")
+    required = {
+        "schema_version": 1,
+        "kind": "uv-lock",
+        "uv_lock_sha256": environment_id,
+        "environment_id": environment_id,
+        "environment_path": str(environment_path),
+        "system": "Linux",
+        "machine": "x86_64",
+        "package_check": "passed",
+    }
+    if not ready or not published or any(ready.get(k) != v for k, v in required.items()):
+        return None
+    if published != ready or not re.fullmatch(r"3\.12(?:\.\d+)?", ready.get("python_version", "")):
+        return None
+    return ready
+
+
+def environment_validate(args: argparse.Namespace) -> dict:
+    environment_id = args.environment_id
+    if not re.fullmatch(r"[0-9a-f]{64}", environment_id):
+        raise RuntimeError("environment ID is invalid")
+    environment_path = ENVIRONMENT_ROOT / environment_id
+    ready = _valid_environment_ready(environment_id, environment_path)
+    if not ready:
+        raise RuntimeError("cluster environment is not ready")
+    return {
+        "status": "READY",
+        "environment_id": environment_id,
+        "environment_path": str(environment_path),
+        "ready": ready,
+    }
+
+
+def _environment_job_state(job_id: str) -> str:
+    queue = subprocess.run(
+        ["squeue", "--noheader", "--jobs", job_id, "--format", "%T"],
+        check=False, capture_output=True, text=True,
+    )
+    if queue.returncode != 0:
+        raise RuntimeError(queue.stderr.strip() or "environment squeue query failed")
+    if queue.stdout.strip():
+        return queue.stdout.strip().splitlines()[0]
+    accounting = subprocess.run(
+        ["sacct", "--noheader", "--allocations", "--jobs", job_id,
+         "--format", "State", "--parsable2"],
+        check=False, capture_output=True, text=True,
+    )
+    if accounting.returncode != 0:
+        raise RuntimeError(accounting.stderr.strip() or "environment sacct query failed")
+    states = [line.split("|", 1)[0] for line in accounting.stdout.splitlines() if line]
+    return states[0] if states else "UNKNOWN"
+
+
+def _query_environment_marker(account: str, marker: str) -> str | None:
+    queue = subprocess.run(
+        ["squeue", "--noheader", "--user", os.environ["USER"], "--account", account,
+         "--name", "dscnet-env", "--format", "%A|%k"],
+        check=False, capture_output=True, text=True,
+    )
+    if queue.returncode != 0:
+        raise RuntimeError(queue.stderr.strip() or "environment squeue recovery failed")
+    matches = [job for job, comment in _parse_job_rows(queue.stdout) if comment == marker]
+    if len(matches) > 1:
+        raise RuntimeError("multiple environment setup jobs have the same marker")
+    if matches:
+        return matches[0]
+    accounting = subprocess.run(
+        ["sacct", "--noheader", "--allocations", "--user", os.environ["USER"],
+         "--account", account, "--name", "dscnet-env", "--starttime", "now-1days",
+         "--format", "JobIDRaw,Comment", "--parsable2"],
+        check=False, capture_output=True, text=True,
+    )
+    if accounting.returncode != 0:
+        raise RuntimeError(accounting.stderr.strip() or "environment sacct recovery failed")
+    matches = [job for job, comment in _parse_job_rows(accounting.stdout) if comment == marker]
+    if len(matches) > 1:
+        raise RuntimeError("multiple environment setup jobs have the same marker")
+    return matches[0] if matches else None
+
+
+def _environment_setup_script(source: Path, environment_id: str, account: str) -> str:
+    helper = source / "tools" / "expctl_remote.py"
+    return f"""#!/usr/bin/env bash
+#SBATCH --job-name=dscnet-env
+#SBATCH --output={ALLOWED_EXPERIMENT_ROOT}/environment-setup-{environment_id}-%j.out
+#SBATCH --error={ALLOWED_EXPERIMENT_ROOT}/environment-setup-{environment_id}-%j.err
+#SBATCH --account={account}
+#SBATCH --partition={ENVIRONMENT_PARTITION}
+#SBATCH --cpus-per-task={ENVIRONMENT_CPUS}
+#SBATCH --mem={ENVIRONMENT_MEMORY}
+#SBATCH --time={ENVIRONMENT_TIME}
+set -euo pipefail
+umask 077
+export TMPDIR={ALLOWED_EXPERIMENT_ROOT}/.tmp/environment-{environment_id}-$SLURM_JOB_ID
+export UV_CACHE_DIR={ALLOWED_EXPERIMENT_ROOT}/.uv-cache
+mkdir -p "$TMPDIR" "$UV_CACHE_DIR"
+trap 'rm -rf -- "$TMPDIR"' EXIT
+{ENVIRONMENT_BASE_PYTHON} {helper} environment-build --source-root {source} --uv-lock-sha256 {environment_id}
+"""
+
+
+def environment_build(args: argparse.Namespace) -> dict:
+    os.umask(0o077)
+    if not str(os.environ.get("SLURM_JOB_ID", "")).isdigit() or os.environ.get(
+        "SLURM_JOB_PARTITION"
+    ) != ENVIRONMENT_PARTITION:
+        raise RuntimeError("environment builds must run in the allowlisted Slurm job")
+    source = _environment_source(args.source_root)
+    environment_id, final = _environment_identity(source, args.uv_lock_sha256)
+    control = _environment_control(environment_id)
+    stage = ENVIRONMENT_ROOT / f".{environment_id}.build-{os.environ.get('SLURM_JOB_ID', os.getpid())}"
+    if stage.exists() or stage.is_symlink():
+        if stage.is_dir() and not stage.is_symlink():
+            import shutil
+            shutil.rmtree(stage)
+        else:
+            stage.unlink()
+    stage.mkdir(parents=True, mode=0o700)
+    try:
+        _environment_identity(source, environment_id)
+        env = {
+            **os.environ,
+            "UV_PROJECT_ENVIRONMENT": str(stage),
+            "TMPDIR": os.environ.get("TMPDIR", str(ALLOWED_EXPERIMENT_ROOT / ".tmp")),
+            "UV_CACHE_DIR": os.environ.get("UV_CACHE_DIR", str(ALLOWED_EXPERIMENT_ROOT / ".uv-cache")),
+        }
+        sync = subprocess.run(
+            [str(ENVIRONMENT_UV), "sync", "--locked", "--no-install-project",
+             "--python", str(ENVIRONMENT_BASE_PYTHON), "--project", str(source)],
+            check=False, capture_output=True, text=True, env=env,
+        )
+        if sync.returncode != 0:
+            raise RuntimeError(sync.stderr.strip() or "uv sync failed")
+        check = subprocess.run(
+            [str(ENVIRONMENT_UV), "pip", "check", "--python", str(stage / "bin/python")],
+            check=False, capture_output=True, text=True, env=env,
+        )
+        if check.returncode != 0:
+            raise RuntimeError(check.stderr.strip() or "uv pip check failed")
+        probe = subprocess.run(
+            [str(stage / "bin/python"), "-c",
+             "import json,platform,sys; print(json.dumps({'python_version': platform.python_version(), 'system': platform.system(), 'machine': platform.machine()}))"],
+            check=False, capture_output=True, text=True, env=env,
+        )
+        if probe.returncode != 0:
+            raise RuntimeError(probe.stderr.strip() or "environment Python probe failed")
+        platform_evidence = json.loads(probe.stdout)
+        if not re.fullmatch(r"3\.12(?:\.\d+)?", platform_evidence.get("python_version", "")):
+            raise RuntimeError("environment Python must be version 3.12")
+        if platform_evidence.get("system") != "Linux" or platform_evidence.get("machine") != "x86_64":
+            raise RuntimeError("environment platform must be Linux x86_64")
+        ready = {
+            "schema_version": 1, "kind": "uv-lock",
+            "uv_lock_sha256": environment_id, "environment_id": environment_id,
+            "environment_path": str(final), "package_check": "passed",
+            **platform_evidence,
+        }
+        published_ready = stage / ".dscnet-ready.json"
+        _atomic_json(published_ready, ready)
+        published_ready.chmod(0o600)
+        if final.exists() or final.is_symlink():
+            raise RuntimeError("refusing to mutate an existing published environment")
+        (control / "failure.json").unlink(missing_ok=True)
+        _atomic_json(control / "ready.json", ready)
+        (control / "ready.json").chmod(0o600)
+        os.replace(stage, final)
+        return {"status": "READY", **ready}
+    except Exception as error:
+        import shutil
+        shutil.rmtree(stage, ignore_errors=True)
+        if not final.exists():
+            (control / "ready.json").unlink(missing_ok=True)
+        failure = {"status": "FAILED", "environment_id": environment_id, "error": str(error)}
+        _atomic_json(control / "failure.json", failure)
+        (control / "failure.json").chmod(0o600)
+        raise
+
+
+def environment_ensure(args: argparse.Namespace) -> dict:
+    source = _environment_source(args.source_root)
+    environment_id, final = _environment_identity(source, args.uv_lock_sha256)
+    if args.account not in TRUSTED_ACCOUNTS:
+        raise RuntimeError("environment setup account is not allowlisted")
+    control = _environment_control(environment_id)
+    lock_path = ENVIRONMENT_ROOT / ".control" / ".environment.lock"
+    if lock_path.is_symlink() or (lock_path.exists() and not lock_path.is_file()):
+        raise RuntimeError("environment lock path is unsafe")
+    with lock_path.open("a+") as lock:
+        lock_path.chmod(0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        ready = _valid_environment_ready(environment_id, final)
+        if ready:
+            return {"status": "READY", "environment_id": environment_id, "environment_path": str(final), "ready": ready}
+        receipt_path = control / "submission.json"
+        intent_path = control / "submission-intent.json"
+        failure_path = control / "failure.json"
+        expected_marker = f"expctl-env:{environment_id}"
+        receipt = _private_json(receipt_path) if receipt_path.exists() else None
+        if receipt_path.exists() and (
+            not receipt
+            or not JOB_ID.fullmatch(str(receipt.get("job_id", "")))
+            or receipt.get("marker") != expected_marker
+            or receipt.get("status") not in {"submitted", "recovered"}
+        ):
+            raise RuntimeError("environment setup receipt is invalid")
+        if receipt:
+            job_id = str(receipt["job_id"])
+            state = _environment_job_state(job_id).split("+", 1)[0]
+            if state == "UNKNOWN":
+                if not args.retry:
+                    raise RuntimeError(
+                        f"environment setup job {job_id} is no longer visible without "
+                        "valid ready state; retry explicitly"
+                    )
+            elif state not in ENVIRONMENT_TERMINAL_STATES:
+                return {"status": "BUILDING", "job_id": job_id, "environment_id": environment_id, "environment_path": str(final)}
+            elif not args.retry:
+                raise RuntimeError(f"environment setup job {job_id} ended in {state} without valid ready state; retry explicitly")
+        elif failure_path.exists() and not args.retry:
+            raise RuntimeError("environment setup previously failed; retry explicitly")
+        if args.retry:
+            for path in (receipt_path, intent_path, failure_path):
+                path.unlink(missing_ok=True)
+        marker = expected_marker
+        if intent_path.exists():
+            intent = _private_json(intent_path)
+            if (
+                not intent
+                or intent.get("marker") != marker
+                or intent.get("status") != "before_sbatch"
+                or intent.get("source_root") != str(source)
+            ):
+                raise RuntimeError("environment setup intent is invalid")
+            recovered = _query_environment_marker(args.account, marker)
+            if recovered:
+                record = {"status": "recovered", "job_id": recovered, "marker": marker}
+                _atomic_json(receipt_path, record)
+                receipt_path.chmod(0o600)
+                state = _environment_job_state(recovered).split("+", 1)[0]
+                if state in ENVIRONMENT_TERMINAL_STATES:
+                    raise RuntimeError(f"environment setup job {recovered} ended in {state} without valid ready state; retry explicitly")
+                return {"status": "BUILDING", "job_id": recovered, "environment_id": environment_id, "environment_path": str(final)}
+            raise RuntimeError("environment setup recovery pending: no matching Slurm job is visible")
+        script = control / "setup.sbatch"
+        script.write_text(_environment_setup_script(source, environment_id, args.account))
+        script.chmod(0o600)
+        _atomic_json(intent_path, {"status": "before_sbatch", "marker": marker, "source_root": str(source)})
+        intent_path.chmod(0o600)
+        submitted = subprocess.run(
+            ["sbatch", "--parsable", "--comment", marker, str(script)],
+            check=False, capture_output=True, text=True,
+        )
+        match = JOB_ID.fullmatch(submitted.stdout.strip())
+        if submitted.returncode != 0 or match is None:
+            detail = submitted.stderr.strip() or submitted.stdout.strip() or "invalid empty response"
+            failure = {"status": "FAILED", "error": f"environment setup submission rejected: {detail}"}
+            _atomic_json(failure_path, failure)
+            failure_path.chmod(0o600)
+            raise RuntimeError(failure["error"])
+        job_id = match.group(1)
+        record = {"status": "submitted", "job_id": job_id, "marker": marker}
+        _atomic_json(receipt_path, record)
+        receipt_path.chmod(0o600)
+        return {"status": "BUILDING", "job_id": job_id, "environment_id": environment_id, "environment_path": str(final)}
+
+
 def _parse_job_rows(output: str) -> list[tuple[str, str]]:
     rows = []
     for line in output.splitlines():
@@ -196,6 +558,9 @@ def _query_marked_jobs(account: str, marker: str, include_accounting: bool):
 def submit(args: argparse.Namespace) -> dict:
     run_dir = Path(args.run_dir).resolve()
     remote_root = Path(args.remote_root).resolve()
+    dependency_job_id = getattr(args, "dependency_job_id", None)
+    if dependency_job_id is not None and not re.fullmatch(r"[0-9]+", str(dependency_job_id)):
+        raise RuntimeError("dependency job ID must be numeric")
     if remote_root not in run_dir.parents:
         raise RuntimeError("run directory is outside the configured remote root")
     receipt = run_dir / "control" / "submission.json"
@@ -208,13 +573,18 @@ def submit(args: argparse.Namespace) -> dict:
         if receipt.is_file():
             recorded = json.loads(receipt.read_text())
             if recorded.get("job_id"):
+                if recorded.get("dependency_job_id") != dependency_job_id:
+                    raise RuntimeError("submission dependency differs from the recorded receipt")
                 return recorded
             raise RuntimeError(recorded.get("error", "submission rejected"))
         recovered, queued = _query_marked_jobs(
             args.account, marker, include_accounting=intent.is_file()
         )
         if recovered:
-            record = {"status": "recovered", "job_id": recovered, "marker": marker}
+            record = {
+                "status": "recovered", "job_id": recovered, "marker": marker,
+                "dependency_job_id": dependency_job_id,
+            }
             _atomic_json(receipt, record)
             return record
         if intent.is_file():
@@ -225,15 +595,16 @@ def submit(args: argparse.Namespace) -> dict:
             raise RuntimeError(
                 "submission blocked: the SQLite backend permits one active run"
             )
-        _atomic_json(intent, {"marker": marker, "status": "before_sbatch"})
+        _atomic_json(intent, {
+            "marker": marker, "status": "before_sbatch",
+            "dependency_job_id": dependency_job_id,
+        })
+        sbatch = ["sbatch", "--parsable", "--comment", marker]
+        if dependency_job_id is not None:
+            sbatch.extend(["--dependency", f"afterok:{dependency_job_id}"])
+        sbatch.append(str(run_dir / "control" / "job.sbatch"))
         result = subprocess.run(
-            [
-                "sbatch",
-                "--parsable",
-                "--comment",
-                marker,
-                str(run_dir / "control" / "job.sbatch"),
-            ],
+            sbatch,
             check=False,
             capture_output=True,
             text=True,
@@ -250,6 +621,7 @@ def submit(args: argparse.Namespace) -> dict:
             "job_id": match.group(1),
             "sbatch_response": value,
             "marker": marker,
+            "dependency_job_id": dependency_job_id,
         }
         _atomic_json(receipt, record)
         return record
@@ -411,6 +783,7 @@ def _valid_ui_record(record) -> bool:
         and record.get("tracking_uri") == ALLOWED_MLFLOW_URI
         and record.get("artifact_root") == str(ALLOWED_ARTIFACT_ROOT)
         and record.get("authentication") == "basic"
+        and bool(re.fullmatch(r"[0-9a-f]{64}", record.get("environment_id", "")))
         and isinstance(record.get("started_epoch"), (int, float))
         and isinstance(record.get("deadline_epoch"), (int, float))
         and math.isfinite(record["started_epoch"])
@@ -509,15 +882,22 @@ def _ui_start(args: argparse.Namespace) -> dict:
         raise RuntimeError("MLflow tracking URI is not allowlisted")
     if Path(args.artifact_root).resolve() != ALLOWED_ARTIFACT_ROOT:
         raise RuntimeError("MLflow artifact root is not allowlisted")
-    if Path(args.python) != ALLOWED_PYTHON:
-        raise RuntimeError("MLflow Python path is not allowlisted")
+    if not re.fullmatch(r"[0-9a-f]{64}", args.environment_id):
+        raise RuntimeError("MLflow environment ID is invalid")
+    environment_path = ENVIRONMENT_ROOT / args.environment_id
+    if not _valid_environment_ready(args.environment_id, environment_path):
+        raise RuntimeError(
+            "current uv.lock cluster environment is not ready; submit an experiment "
+            "or run environment-ensure first"
+        )
+    python = environment_path / "bin" / "python"
     if args.port != MLFLOW_UI_PORT:
         raise RuntimeError("MLflow UI port is not allowlisted")
     if not 1 <= args.timeout_minutes <= MAX_UI_TIMEOUT_MINUTES:
         raise RuntimeError("MLflow UI timeout is outside the allowlist")
     auth_config, password, csrf_secret = _ui_auth(state_path.parent)
     current = _ui_status_record(state_path)
-    if current["state"] == "running":
+    if current["state"] == "running" and current["environment_id"] == args.environment_id:
         return {
             **current,
             "started": False,
@@ -525,6 +905,10 @@ def _ui_start(args: argparse.Namespace) -> dict:
             "username": MLFLOW_UI_USERNAME,
             "password": password,
         }
+    if current["state"] == "running":
+        if not _stop_ui_process(current):
+            raise RuntimeError("old-environment MLflow UI process did not stop")
+        state_path.unlink(missing_ok=True)
     with socket.socket() as probe:
         probe.settimeout(0.2)
         if probe.connect_ex(("127.0.0.1", args.port)) == 0:
@@ -535,7 +919,7 @@ def _ui_start(args: argparse.Namespace) -> dict:
         "--signal=TERM",
         "--kill-after=10s",
         f"{args.timeout_minutes}m",
-        str(ALLOWED_PYTHON),
+        str(python),
         "-m",
         "mlflow",
         "ui",
@@ -591,6 +975,8 @@ def _ui_start(args: argparse.Namespace) -> dict:
         "tracking_uri": ALLOWED_MLFLOW_URI,
         "artifact_root": str(ALLOWED_ARTIFACT_ROOT),
         "authentication": "basic",
+        "environment_id": args.environment_id,
+        "environment_path": str(environment_path),
         "started_epoch": now,
         "deadline_epoch": now + args.timeout_minutes * 60,
     }
@@ -799,6 +1185,17 @@ def build_parser() -> argparse.ArgumentParser:
     submit_parser.add_argument("--run-dir", required=True)
     submit_parser.add_argument("--remote-root", required=True)
     submit_parser.add_argument("--account", required=True)
+    submit_parser.add_argument("--dependency-job-id", type=_job_id)
+    ensure = subparsers.add_parser("environment-ensure")
+    ensure.add_argument("--source-root", required=True)
+    ensure.add_argument("--uv-lock-sha256", required=True)
+    ensure.add_argument("--account", required=True)
+    ensure.add_argument("--retry", action="store_true")
+    build = subparsers.add_parser("environment-build")
+    build.add_argument("--source-root", required=True)
+    build.add_argument("--uv-lock-sha256", required=True)
+    environment_check = subparsers.add_parser("environment-validate")
+    environment_check.add_argument("--environment-id", required=True)
     for name in ("status", "cancel"):
         child = subparsers.add_parser(name)
         child.add_argument("--job-id", required=True, type=_job_id)
@@ -809,7 +1206,7 @@ def build_parser() -> argparse.ArgumentParser:
     ui_start_parser.add_argument("--experiment-root", required=True)
     ui_start_parser.add_argument("--tracking-uri", required=True)
     ui_start_parser.add_argument("--artifact-root", required=True)
-    ui_start_parser.add_argument("--python", required=True)
+    ui_start_parser.add_argument("--environment-id", required=True)
     ui_start_parser.add_argument("--port", required=True, type=int)
     ui_start_parser.add_argument("--timeout-minutes", required=True, type=int)
     for name in ("ui-status", "ui-stop"):
@@ -829,6 +1226,9 @@ def main() -> int:
     handlers = {
         "verify-source": verify_source,
         "verify-data": verify_data,
+        "environment-ensure": environment_ensure,
+        "environment-build": environment_build,
+        "environment-validate": environment_validate,
         "submit": submit,
         "status": status,
         "cancel": cancel,

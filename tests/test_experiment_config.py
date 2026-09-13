@@ -1,28 +1,18 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from hydra.errors import ConfigCompositionException
 
-MODULE_DIR = (
-    Path(__file__).parents[1]
-    / "DSCNet_3D_opensource"
-    / "Code"
-    / "Kipa"
-    / "DSCNet"
-)
-sys.path.insert(0, str(MODULE_DIR))
-
-import S0_Main
-from S4_Experiment_Config import (
+from dscnet import workflow
+from dscnet.experiment.config import (
     load_experiment_config,
     resolved_yaml,
     to_runtime_namespace,
 )
-
 
 class ExperimentConfigTests(unittest.TestCase):
     def test_unknown_keys_fail_during_composition(self):
@@ -115,9 +105,9 @@ class ExperimentConfigTests(unittest.TestCase):
                 Image_Va_txt=str(root / "missing-val-images.txt"),
                 Label_Va_txt=str(root / "missing-val-labels.txt"),
             )
-            with patch.object(S0_Main, "Create_files") as create_files:
+            with patch.object(workflow, "Create_files") as create_files:
                 with self.assertRaisesRegex(FileNotFoundError, "training requires"):
-                    S0_Main.Process(args)
+                    workflow.Process(args)
             create_files.assert_not_called()
 
     def test_evaluation_requires_a_checkpoint(self):
@@ -138,7 +128,7 @@ class ExperimentConfigTests(unittest.TestCase):
                 model_name_max="best.pt",
             )
             with self.assertRaisesRegex(FileNotFoundError, "one checkpoint"):
-                S0_Main.validate_action_artifacts(args)
+                workflow.validate_action_artifacts(args)
 
     def test_resumed_training_requires_latest_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -160,7 +150,7 @@ class ExperimentConfigTests(unittest.TestCase):
                 model_name="latest.pt",
             )
             with self.assertRaisesRegex(FileNotFoundError, "resumed training"):
-                S0_Main.validate_action_artifacts(args)
+                workflow.validate_action_artifacts(args)
 
     def test_prepare_requires_all_split_directories(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -175,8 +165,7 @@ class ExperimentConfigTests(unittest.TestCase):
                 Te_Label_dir=str(root / "test-label"),
             )
             with self.assertRaisesRegex(FileNotFoundError, "dataset directories"):
-                S0_Main.validate_action_artifacts(args)
-
+                workflow.validate_action_artifacts(args)
 
 if __name__ == "__main__":
     unittest.main()

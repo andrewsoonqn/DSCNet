@@ -27,25 +27,32 @@ import time
 from typing import Any, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CODE_DIR = REPO_ROOT / "DSCNet_3D_opensource" / "Code" / "Kipa" / "DSCNet"
-sys.path.insert(0, str(CODE_DIR))
+SRC_DIR = REPO_ROOT / "src"
+sys.path.insert(0, str(SRC_DIR))
 
 from omegaconf import OmegaConf
 
-from S4_Experiment_Config import (
+from dscnet.experiment.config import (
     identity_config_yaml,
     load_experiment_config,
     resolved_yaml,
     to_runtime_namespace,
     validate_config,
 )
-from S4_Experiment_Tracking import build_dataset_manifest, collect_git_provenance, sha256_file
+from dscnet.experiment.tracking import (
+    build_dataset_manifest,
+    collect_git_provenance,
+    sha256_file,
+)
 
-CONTROLLER_VERSION = "1"
+CONTROLLER_VERSION = "2"
 PI_EXTENSION_VERSION = "1"
 ALLOWED_HOST = "xlogin1"
 ALLOWED_REMOTE_CHECKOUT = "/home/a/andrewsq/dev/urop/dscnet"
 ALLOWED_REMOTE_ROOT = "/home/a/andrewsq/data/urop/experiments"
+ENVIRONMENT_ROOT = "/home/a/andrewsq/data/urop/environments"
+ENVIRONMENT_UV = "/home/a/andrewsq/.local/bin/uv"
+ENVIRONMENT_BASE_PYTHON = "/usr/bin/python3"
 ALLOWED_PARTITION = "gpu-long"
 ALLOWED_GPU_TYPE = "a100-40"
 TRUSTED_ACCOUNTS: frozenset[str] = frozenset({"allusers"})
@@ -206,10 +213,11 @@ def _execution_dirty_paths(root: Path) -> list[str]:
         candidate = Path(path)
         if (
             candidate.suffix.lower() in EXECUTION_SUFFIXES
-            or path == "requirements.txt"
+            or path in {"pyproject.toml", "uv.lock"}
             or path.startswith("configs/")
             or path.startswith("tools/")
-            or path.startswith("DSCNet_3D_opensource/")
+            or path.startswith("scripts/")
+            or path.startswith("src/")
         ):
             paths.append(path)
     return sorted(set(paths))
@@ -347,10 +355,15 @@ def _write_remote_text_manifests(
 
 
 def _environment_lock() -> dict[str, str]:
-    requirements = REPO_ROOT / "requirements.txt"
+    uv_lock = REPO_ROOT / "uv.lock"
+    if not uv_lock.is_file():
+        raise ExpctlError("uv.lock is required for reproducible experiments")
+    lock_sha256 = sha256_file(uv_lock)
     return {
-        "kind": "requirements-sha256",
-        "requirements_sha256": sha256_file(requirements),
+        "kind": "uv-lock",
+        "uv_lock_sha256": lock_sha256,
+        "environment_id": lock_sha256,
+        "environment_path": f"{ENVIRONMENT_ROOT}/{lock_sha256}",
     }
 
 
@@ -384,9 +397,6 @@ def _policy(config: Any) -> None:
         failures.append("time request exceeds the allowlist")
     if slurm.max_concurrent_runs != 1:
         failures.append("SQLite mode requires max_concurrent_runs=1")
-    expected_python = f"{ALLOWED_REMOTE_CHECKOUT}/DSCNetEnv/bin/python"
-    if slurm.python_path != expected_python:
-        failures.append("Python path is not allowlisted")
     if failures:
         raise ExpctlError("; ".join(failures))
 
@@ -703,7 +713,7 @@ class ExperimentController:
                 json.dumps(source_manifest, indent=2, sort_keys=True) + "\n"
             )
             manifest = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "controller_version": CONTROLLER_VERSION,
                 "pi_extension_version": PI_EXTENSION_VERSION,
                 "run_id": run_id,
@@ -723,6 +733,10 @@ class ExperimentController:
                 "account": config.runtime.slurm.account,
                 "remote_root": config.runtime.remote_experiment_root,
                 "remote_run_dir": remote_run,
+                "environment": environment,
+                "environment_status": "unchecked",
+                "environment_job_id": None,
+                "environment_path": environment["environment_path"],
                 "job_id": None,
                 "state": "staged",
             }
@@ -738,9 +752,10 @@ class ExperimentController:
         outputs = f"{remote_run}/outputs"
         command = " ".join(
             shlex.quote(value)
-            for value in ["bash", f"{source}/run_models.sbatch"]
+            for value in ["bash", f"{source}/scripts/run_slurm.sh"]
         )
         helper = f"{source}/tools/expctl_remote.py"
+        python = manifest["environment_path"] + "/bin/python"
         return f"""#!/usr/bin/env bash
 #SBATCH --job-name=dscnet-expctl
 #SBATCH --output={remote_run}/logs/slurm-%j.out
@@ -757,12 +772,13 @@ export DSCNET_CONTROL_DIR={shlex.quote(control)}
 export DSCNET_EXPERIMENT_DIGEST={shlex.quote(manifest['experiment_digest'])}
 export DSCNET_RUN_RESULT_PATH={shlex.quote(outputs + '/run-result.json')}
 export DSCNET_FINAL_METRICS_PATH={shlex.quote(outputs + '/final-metrics.json')}
-export DSCNET_PYTHON={shlex.quote(slurm.python_path)}
+export DSCNET_PYTHON={shlex.quote(python)}
 export DSCNET_SOURCE_ROOT={shlex.quote(source)}
 export DSCNET_RESOLVED_CONFIG={shlex.quote(control + '/resolved-config.yaml')}
+{ENVIRONMENT_BASE_PYTHON} {shlex.quote(helper)} environment-validate --environment-id {shlex.quote(manifest['environment']['environment_id'])} || exit $?
 {command} 2>&1 | tee {shlex.quote(remote_run + '/logs/pipeline.log')}
 pipeline_status=${{PIPESTATUS[0]}}
-{shlex.quote(slurm.python_path)} {shlex.quote(helper)} finalize --run-dir {shlex.quote(remote_run)} --best-checkpoint {shlex.quote(to_runtime_namespace(config).model_name_max)} --latest-checkpoint {shlex.quote(to_runtime_namespace(config).model_name)}
+{shlex.quote(python)} {shlex.quote(helper)} finalize --run-dir {shlex.quote(remote_run)} --best-checkpoint {shlex.quote(to_runtime_namespace(config).model_name_max)} --latest-checkpoint {shlex.quote(to_runtime_namespace(config).model_name)}
 finalize_status=$?
 if [[ "$pipeline_status" -ne 0 ]]; then
   exit "$pipeline_status"
@@ -798,20 +814,22 @@ exit "$finalize_status"
             host = staged["host"]
             if existing.get("state") == "submission_unknown" and not retry:
                 helper = f"{remote_run}/source/tools/expctl_remote.py"
-                recovery = self.transport.ssh(
-                    host,
-                    [
-                        "python3",
-                        helper,
-                        "submit",
-                        "--run-dir",
-                        remote_run,
-                        "--remote-root",
-                        staged["remote_root"],
-                        "--account",
-                        staged["account"],
-                    ],
-                )
+                recovery_argv = [
+                    "python3",
+                    helper,
+                    "submit",
+                    "--run-dir",
+                    remote_run,
+                    "--remote-root",
+                    staged["remote_root"],
+                    "--account",
+                    staged["account"],
+                ]
+                if staged.get("environment_status") == "BUILDING":
+                    recovery_argv.extend(
+                        ["--dependency-job-id", staged["environment_job_id"]]
+                    )
+                recovery = self.transport.ssh(host, recovery_argv)
                 if recovery.returncode != 0:
                     detail = _bounded_detail(recovery.stderr or recovery.stdout)
                     raise ExpctlError(
@@ -926,21 +944,63 @@ exit "$finalize_status"
                 ),
                 "remote dataset verification",
             )
-            try:
-                submission = self.transport.ssh(
-                    host,
-                    [
-                        "python3",
-                        helper,
-                        "submit",
-                        "--run-dir",
-                        remote_run,
-                        "--remote-root",
-                        staged["remote_root"],
-                        "--account",
-                        staged["account"],
-                    ],
+            ensure_argv = [
+                "python3",
+                helper,
+                "environment-ensure",
+                "--source-root",
+                f"{remote_run}/source",
+                "--uv-lock-sha256",
+                staged["environment"]["uv_lock_sha256"],
+                "--account",
+                staged["account"],
+            ]
+            if retry:
+                ensure_argv.append("--retry")
+            ensured = json.loads(
+                _checked(
+                    self.transport.ssh(host, ensure_argv),
+                    "remote cluster environment validation",
                 )
+            )
+            environment_status = ensured.get("status")
+            environment_job_id = ensured.get("job_id")
+            if environment_status not in {"READY", "BUILDING"}:
+                raise ExpctlError("remote environment helper returned an invalid status")
+            if ensured.get("environment_path") != staged["environment_path"]:
+                raise ExpctlError("remote environment helper returned an invalid path")
+            if environment_status == "BUILDING" and not JOB_ID.fullmatch(
+                str(environment_job_id or "")
+            ):
+                raise ExpctlError("remote environment helper returned an invalid job ID")
+            staged.update(
+                environment_status=environment_status,
+                environment_job_id=(
+                    str(environment_job_id) if environment_status == "BUILDING" else None
+                ),
+            )
+            _atomic_json(local_control / "run-manifest.json", staged)
+            _checked(
+                self.transport.sync_to(
+                    [local_control / "run-manifest.json"], host, f"{remote_run}/control"
+                ),
+                "environment evidence synchronization",
+            )
+            submit_argv = [
+                "python3",
+                helper,
+                "submit",
+                "--run-dir",
+                remote_run,
+                "--remote-root",
+                staged["remote_root"],
+                "--account",
+                staged["account"],
+            ]
+            if environment_status == "BUILDING":
+                submit_argv.extend(["--dependency-job-id", str(environment_job_id)])
+            try:
+                submission = self.transport.ssh(host, submit_argv)
                 if submission.returncode != 0:
                     detail = _bounded_detail(submission.stderr or submission.stdout)
                     staged["state"] = (
@@ -1002,8 +1062,8 @@ exit "$finalize_status"
                     config.runtime.mlflow.tracking_uri,
                     "--artifact-root",
                     config.runtime.mlflow.artifact_root,
-                    "--python",
-                    config.runtime.slurm.python_path,
+                    "--environment-id",
+                    _environment_lock()["environment_id"],
                     "--port",
                     str(MLFLOW_UI_PORT),
                     "--timeout-minutes",
@@ -1217,6 +1277,62 @@ exit "$finalize_status"
             raise ExpctlError("recorded remote root is not allowlisted")
         if record.get("remote_run_dir") != expected_remote_dir:
             raise ExpctlError("recorded remote run directory is invalid")
+        schema_version = record.get("schema_version")
+        if schema_version == 1:
+            if record.get("controller_version") != "1" or any(
+                field in record
+                for field in (
+                    "environment",
+                    "environment_path",
+                    "environment_status",
+                    "environment_job_id",
+                )
+            ):
+                raise ExpctlError("recorded legacy run manifest is invalid")
+        elif schema_version == 2:
+            if record.get("controller_version") != CONTROLLER_VERSION:
+                raise ExpctlError("recorded controller version is invalid")
+            environment = record.get("environment")
+            environment_id = (
+                environment.get("environment_id")
+                if isinstance(environment, dict)
+                else None
+            )
+            expected_environment_path = (
+                f"{ENVIRONMENT_ROOT}/{environment_id}"
+                if isinstance(environment_id, str)
+                else ""
+            )
+            if (
+                not isinstance(environment, dict)
+                or set(environment)
+                != {
+                    "kind",
+                    "uv_lock_sha256",
+                    "environment_id",
+                    "environment_path",
+                }
+                or environment.get("kind") != "uv-lock"
+                or not isinstance(environment_id, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", environment_id)
+                or environment.get("uv_lock_sha256") != environment_id
+                or environment.get("environment_path") != expected_environment_path
+                or record.get("environment_path") != expected_environment_path
+                or record.get("environment_status")
+                not in {"unchecked", "READY", "BUILDING"}
+            ):
+                raise ExpctlError("recorded environment routing is invalid")
+            environment_job_id = record.get("environment_job_id")
+            if (
+                record["environment_status"] == "BUILDING"
+                and not JOB_ID.fullmatch(str(environment_job_id or ""))
+            ) or (
+                record["environment_status"] != "BUILDING"
+                and environment_job_id is not None
+            ):
+                raise ExpctlError("recorded environment job is invalid")
+        else:
+            raise ExpctlError("recorded run manifest schema is unsupported")
         return path, record
 
     def _job_operation(self, run_id: str, operation: str, extra: Sequence[str] = ()) -> dict[str, Any]:

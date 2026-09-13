@@ -1,19 +1,9 @@
-import sys
 import unittest
 from pathlib import Path
+
 from types import SimpleNamespace
 
-MODULE_DIR = (
-    Path(__file__).parents[1]
-    / "DSCNet_3D_opensource"
-    / "Code"
-    / "Kipa"
-    / "DSCNet"
-)
-sys.path.insert(0, str(MODULE_DIR))
-
-from S4_Experiment_Config import resolve_runtime_paths
-
+from dscnet.experiment.config import resolve_runtime_paths
 
 class PathResolutionTests(unittest.TestCase):
     def _args(self, **overrides):
@@ -71,7 +61,6 @@ class PathResolutionTests(unittest.TestCase):
         self.assertEqual(args.Tr_Image_dir, "/data/custom-images")
         self.assertEqual(args.Image_Tr_txt, "/frozen/train-images.txt")
         self.assertEqual(args.Meanstd_path, "/frozen/train-stats.npy")
-
 
 if __name__ == "__main__":
     unittest.main()

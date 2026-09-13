@@ -1,4 +1,3 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,17 +5,7 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
-MODULE_DIR = (
-    Path(__file__).parents[1]
-    / "DSCNet_3D_opensource"
-    / "Code"
-    / "Kipa"
-    / "DSCNet"
-)
-sys.path.insert(0, str(MODULE_DIR))
-
-from S3_Evaluation_Metrics import summarize_predictions
-
+from dscnet.evaluation.summary import summarize_predictions
 
 class EvaluationSummaryTests(unittest.TestCase):
     def test_summary_reports_topology_and_confusion_counts(self):
@@ -52,7 +41,6 @@ class EvaluationSummaryTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["recall"], 2 / 3)
         self.assertLess(metrics["dice"], 1.0)
         self.assertLess(metrics["cldice"], 1.0)
-
 
 if __name__ == "__main__":
     unittest.main()

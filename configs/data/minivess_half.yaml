@@ -2,6 +2,6 @@ defaults:
   - data_schema
   - _self_
 
-root_dir: DSCNet_3D_opensource
+root_dir: artifacts/runtime
 data_dir: Data/MiniVess_Half
 run_label: DSCNet_3D

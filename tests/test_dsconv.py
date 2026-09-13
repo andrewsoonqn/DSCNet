@@ -1,23 +1,12 @@
-import sys
 import unittest
 from pathlib import Path
 
 import torch
 
-MODULE_DIR = (
-    Path(__file__).parents[1]
-    / "DSCNet_3D_opensource"
-    / "Code"
-    / "Kipa"
-    / "DSCNet"
-)
-sys.path.insert(0, str(MODULE_DIR))
-
-from S3_DSCNet import DSCNet as StandardDSCNet
-from S3_DSCNet_Optimized import DSCNet as OptimizedDSCNet
-from S3_DSConv_VariableOffset import DCN as StandardDCN
-from S3_FastDSConv_RootedExactOffset_new_AllDir import DCN as OptimizedDCN
-
+from dscnet.models.standard import DSCNet as StandardDSCNet
+from dscnet.models.optimized import DSCNet as OptimizedDSCNet
+from dscnet.models.dsconv import DCN as StandardDCN
+from dscnet.models.optimized_dsconv import DCN as OptimizedDCN
 
 class ModelConfigurationTests(unittest.TestCase):
     def test_kernel_size_reaches_both_sampler_implementations(self):
@@ -34,7 +23,6 @@ class ModelConfigurationTests(unittest.TestCase):
             StandardDSCNet(1, 2, 4, 1.75, True, "cpu", 4, 8)
         with self.assertRaisesRegex(ValueError, "odd integer"):
             OptimizedDSCNet(1, 2, 2, 1.75, True, "cpu", 4, 8, 2)
-
 
 class StandardDSConvTests(unittest.TestCase):
     def setUp(self):
@@ -92,7 +80,6 @@ class StandardDSConvTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(offset.grad).all())
         self.assertGreater(offset.grad.abs().sum().item(), 0.0)
 
-
 class OptimizedDSConvTests(unittest.TestCase):
     def setUp(self):
         self.kernel_size = 5
@@ -136,7 +123,6 @@ class OptimizedDSConvTests(unittest.TestCase):
         self.assertGreater(feature.grad.abs().sum().item(), 0.0)
         self.assertTrue(torch.isfinite(offset.grad).all())
         self.assertGreater(offset.grad.abs().sum().item(), 0.0)
-
 
 if __name__ == "__main__":
     unittest.main()
