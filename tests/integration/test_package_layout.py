@@ -62,6 +62,7 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertFalse((REPO_ROOT / "src").exists())
         self.assertTrue((REPO_ROOT / "dscnet" / "__init__.py").is_file())
         mirrored_modules = {
+            "data/dataset.py": "data/test_dataset.py",
             "data/manifests.py": "data/test_manifests.py",
             "evaluation/metrics.py": "evaluation/test_metrics.py",
             "evaluation/sliding_window.py": "evaluation/test_sliding_window.py",

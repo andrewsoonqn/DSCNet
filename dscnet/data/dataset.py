@@ -11,9 +11,10 @@ warnings.filterwarnings("ignore")
 
 def read_file_from_txt(txt_path, sample_count):
     files = []
-    for line in open(txt_path, "r"):
-        for i in range(sample_count):
-            files.append(line.strip())
+    with open(txt_path, "r") as source:
+        for line in source:
+            for _ in range(sample_count):
+                files.append(line.strip())
     return files
 
 
@@ -67,7 +68,7 @@ class Dataloader(data.Dataset):
 
         # Normalization
         mean, std = np.load(self.args.Meanstd_path)
-        image = (image - mean) / std
+        image = ((image - mean) / std).astype(np.float32, copy=False)
 
         if self.shape[0] > z:
             z = self.shape[0]
@@ -107,8 +108,11 @@ class Dataloader(data.Dataset):
             label_trans, name=f"augmented label {label_path}"
         )
         label_trans = to_categorical(label_trans[0], 2)
-        
-        return image_trans, label_trans
+
+        return (
+            np.ascontiguousarray(image_trans, dtype=np.float32),
+            np.ascontiguousarray(label_trans, dtype=np.float32),
+        )
 
     def __len__(self):
         return len(self.image_file)
