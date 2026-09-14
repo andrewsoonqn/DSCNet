@@ -22,6 +22,9 @@ from dscnet.experiment.config import (
     validate_config,
 )
 from dscnet.experiment.modeling import log_training_model
+from dscnet.evaluation.validation_comparisons import (
+    finalize_validation_comparisons, initialize, root_for, atomic_json,
+)
 from dscnet.experiment.tracking import (
     RunRecorder,
     build_consumed_split_manifest,
@@ -140,6 +143,17 @@ def _log_declared_artifacts(recorder: RunRecorder, args, action: str) -> None:
             path = Path(args.Dir_Weights) / name
             if path.is_file():
                 recorder.log_artifact(path, "checkpoints")
+        comparison_root = Path(args.save_path) / "_validation_comparisons"
+        if comparison_root.is_dir():
+            for path in comparison_root.rglob("*"):
+                if any(part.startswith(".") for part in path.relative_to(comparison_root).parts):
+                    continue
+                if path.is_file():
+                    relative_parent = path.parent.relative_to(comparison_root)
+                    artifact_path = "validation-comparisons"
+                    if relative_parent.parts:
+                        artifact_path += "/" + relative_parent.as_posix()
+                    recorder.log_artifact(path, artifact_path)
 
 
 def _write_json_from_environment(variable: str, value: dict[str, Any]) -> None:
@@ -187,7 +201,17 @@ def _execute(config, resolved, parent_run_id: str | None = None) -> dict[str, st
         git_provenance=provenance,
     ) as recorder:
         args.tracker = recorder
-        result = Process(args)
+        if config.action == "train":
+            initialize(args)
+        try:
+            result = Process(args)
+            if config.action == "train":
+                finalize_validation_comparisons(args)
+        except Exception:
+            if config.action == "train":
+                atomic_json(root_for(args) / "status.json", {"state": "failed"})
+                _log_declared_artifacts(recorder, args, config.action)
+            raise
         if result and config.action in {"train", "evaluate"}:
             prefix = "validation" if config.action == "train" else "test"
             final_metrics = {f"{prefix}.{name}": value for name, value in result.items()}
@@ -205,7 +229,36 @@ def _execute(config, resolved, parent_run_id: str | None = None) -> dict[str, st
         run_id = recorder.run_id
     output = {"run_id": str(run_id), "experiment_digest": digest}
     if logged_model is not None:
+        evidence = logged_model["evidence"]
         output["logged_model_id"] = logged_model["model_id"]
+        output["selection"] = {
+            "checkpoint": args.model_name_max,
+            "epoch": evidence["checkpoint_epoch"],
+            "metric": "validation.dice",
+            "value": evidence["checkpoint_best_score"],
+        }
+        controller_run_id = os.environ.get("DSCNET_CONTROLLER_RUN_ID")
+        if controller_run_id:
+            validation_result = {
+                "schema_version": 1,
+                "status": "completed",
+                "controller_run_id": controller_run_id,
+                "training_run_id": str(run_id),
+                "experiment_digest": digest,
+                "logged_model_id": logged_model["model_id"],
+                "checkpoint": {
+                    "name": args.model_name_max,
+                    "sha256": evidence["checkpoint_sha256"],
+                },
+                "selection": {
+                    "epoch": evidence["checkpoint_epoch"],
+                    "metric": "validation.dice",
+                    "value": evidence["checkpoint_best_score"],
+                },
+            }
+            _write_json_from_environment(
+                "DSCNET_VALIDATION_RESULT_PATH", validation_result
+            )
     _write_json_from_environment("DSCNET_RUN_RESULT_PATH", output)
     if final_metrics:
         _write_json_from_environment("DSCNET_FINAL_METRICS_PATH", final_metrics)

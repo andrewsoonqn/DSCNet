@@ -96,13 +96,74 @@ class ExperimentRunTests(unittest.TestCase):
             "dscnet.experiment.run.Process", return_value={"dice": 0.8}
         ), patch(
             "dscnet.experiment.run.log_training_model",
-            return_value={"model_id": "m-1"},
+            return_value={
+                "model_id": "m-1",
+                "evidence": {
+                    "checkpoint_epoch": 70,
+                    "checkpoint_best_score": 0.86,
+                },
+            },
         ) as package:
             result = _execute(config, resolved)
 
         self.assertEqual(result["logged_model_id"], "m-1")
+        self.assertEqual(
+            result["selection"],
+            {
+                "checkpoint": "DSCNet_DSCNet_3D_max",
+                "epoch": 70,
+                "metric": "validation.dice",
+                "value": 0.86,
+            },
+        )
         package.assert_called_once()
         self.assertIsNone(recorder.exit_type)
+
+    def test_formal_training_writes_validation_only_result(self):
+        config, resolved = load_experiment_config(
+            "experiment/dscnet_standard",
+            ["runtime.formal=true", "runtime.allow_dirty=false"],
+        )
+        recorder = FakeRecorder()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "validation-result.json"
+            with patch.dict(
+                "os.environ",
+                {
+                    "DSCNET_CONTROLLER_RUN_ID": "controller-run",
+                    "DSCNET_VALIDATION_RESULT_PATH": str(path),
+                },
+            ), patch(
+                "dscnet.experiment.run.RunRecorder", return_value=recorder
+            ), patch(
+                "dscnet.experiment.run.collect_git_provenance",
+                return_value={"commit": "abc", "dirty": False},
+            ), patch(
+                "dscnet.experiment.run._dataset_manifest",
+                return_value={"digest": "data"},
+            ), patch(
+                "dscnet.experiment.run._lock_identifier", return_value="lock"
+            ), patch(
+                "dscnet.experiment.run.Process", return_value={"dice": 0.8}
+            ), patch(
+                "dscnet.experiment.run.log_training_model",
+                return_value={
+                    "model_id": "m-1",
+                    "evidence": {
+                        "checkpoint_epoch": 70,
+                        "checkpoint_best_score": 0.86,
+                        "checkpoint_sha256": "b" * 64,
+                    },
+                },
+            ):
+                _execute(config, resolved)
+            result = json.loads(path.read_text())
+
+        self.assertEqual(result["schema_version"], 1)
+        self.assertEqual(result["controller_run_id"], "controller-run")
+        self.assertEqual(result["selection"]["metric"], "validation.dice")
+        self.assertEqual(result["selection"]["value"], 0.86)
+        self.assertNotIn("test", json.dumps(result).lower())
 
     def test_packaging_failure_fails_formal_training_run(self):
         config, resolved = load_experiment_config(

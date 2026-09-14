@@ -770,8 +770,10 @@ class ExperimentController:
 set -uo pipefail
 mkdir -p {shlex.quote(remote_run + '/logs')} {shlex.quote(outputs + '/weights')} {shlex.quote(outputs + '/predictions')}
 export DSCNET_CONTROL_DIR={shlex.quote(control)}
+export DSCNET_CONTROLLER_RUN_ID={shlex.quote(manifest['run_id'])}
 export DSCNET_EXPERIMENT_DIGEST={shlex.quote(manifest['experiment_digest'])}
 export DSCNET_RUN_RESULT_PATH={shlex.quote(outputs + '/run-result.json')}
+export DSCNET_VALIDATION_RESULT_PATH={shlex.quote(outputs + '/validation-result.json')}
 export DSCNET_FINAL_METRICS_PATH={shlex.quote(outputs + '/final-metrics.json')}
 export DSCNET_PYTHON={shlex.quote(python)}
 export DSCNET_SOURCE_ROOT={shlex.quote(source)}
@@ -1413,6 +1415,7 @@ exit "$finalize_status"
             "control/Mean_Std.npy",
             "outputs/final-metrics.json",
             "outputs/run-result.json",
+            "outputs/validation-result.json",
         }
         paths = []
         seen = set()

@@ -21,6 +21,7 @@ from dscnet.training.checkpoints import (
 from dscnet.data.dataset import Dataloader
 from dscnet.evaluation.inference import load_normalization, predict_probabilities
 from dscnet.evaluation.summary import log_summary, summarize_predictions
+from dscnet.evaluation.validation_comparisons import record_validation
 from dscnet.models.factory import build_model
 from dscnet.training.losses import cross_loss, dice_cross_loss, entropy_regularization_cross_loss, entropy_loss
 from dscnet.evaluation.metrics import cldice_score, dice_score, to_minivess_binary_mask
@@ -266,6 +267,8 @@ def Train_net(net, args, device, map_kernel_tensor):
                 epoch,
                 dice_save,
             )
+        if epoch >= args.start_verify_epoch and (epoch % args.verify_gap) == 0:
+            record_validation(args, epoch, is_best)
         logger.info(
             "Epoch:[{}/{}] lr={:.7f} loss={:.5f} dice_mean={:.4f} saved_dice={:.4f}".format(
                 epoch,
