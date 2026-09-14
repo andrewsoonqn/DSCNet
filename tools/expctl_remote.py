@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import signal
 import socket
 import stat
@@ -33,6 +34,12 @@ ENVIRONMENT_PARTITION = "normal"
 ENVIRONMENT_CPUS = 2
 ENVIRONMENT_MEMORY = "16G"
 ENVIRONMENT_TIME = "1:00:00"
+AUDIT_PROTOCOL_VERSION = 1
+AUDIT_PARTITION = "gpu-long"
+AUDIT_GPU_TYPE = "a100-40"
+AUDIT_CPUS = 8
+AUDIT_MEMORY = "32G"
+AUDIT_TIME = "48:00:00"
 TRUSTED_ACCOUNTS = frozenset({"allusers"})
 ALLOWED_MLFLOW_URI = "sqlite:////home/a/andrewsq/data/urop/experiments/mlflow.db"
 ALLOWED_ARTIFACT_ROOT = Path("/home/a/andrewsq/data/urop/experiments/mlflow-artifacts")
@@ -627,6 +634,164 @@ def submit(args: argparse.Namespace) -> dict:
         return record
 
 
+def audit(args: argparse.Namespace) -> dict:
+    if args.authorization != "I_AUTHORIZE_FINAL_TEST":
+        raise RuntimeError("explicit final-test authorization is required")
+    run_dir = Path(args.run_dir).resolve()
+    if run_dir.parent != ALLOWED_EXPERIMENT_ROOT / "runs" or run_dir.is_symlink():
+        raise RuntimeError("audit run directory is outside the experiment run root")
+    manifest = json.loads((run_dir / "control" / "run-manifest.json").read_text())
+    if manifest.get("run_id") != run_dir.name or manifest.get("action") != "train":
+        raise RuntimeError("audit accepts completed training runs only")
+    parent_status = status(argparse.Namespace(job_id=str(manifest.get("job_id", ""))))
+    if parent_status["state"].split("+", 1)[0] != "COMPLETED":
+        raise RuntimeError("training Slurm job is not completed")
+    verify_artifacts(argparse.Namespace(run_dir=str(run_dir)))
+    verify_source(
+        argparse.Namespace(
+            source_root=str(run_dir / "source"),
+            manifest=str(run_dir / "control" / "source-manifest.json"),
+        )
+    )
+    validation_result = json.loads(
+        (run_dir / "outputs" / "validation-result.json").read_text()
+    )
+    logged_model_id = validation_result.get("logged_model_id")
+    checkpoint_sha256 = validation_result.get("checkpoint", {}).get("sha256")
+    if (
+        validation_result.get("controller_run_id") != run_dir.name
+        or not isinstance(logged_model_id, str)
+        or not logged_model_id.startswith("m-")
+        or not re.fullmatch(r"[0-9a-f]{64}", str(checkpoint_sha256 or ""))
+    ):
+        raise RuntimeError("training validation result has no auditable Logged Model")
+    key = _canonical_digest(
+        {
+            "protocol_version": AUDIT_PROTOCOL_VERSION,
+            "controller_run_id": run_dir.name,
+            "logged_model_id": logged_model_id,
+            "checkpoint_sha256": checkpoint_sha256,
+        }
+    )
+    audit_dir = ALLOWED_EXPERIMENT_ROOT / "audits" / f"{run_dir.name}-{key[:16]}"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = audit_dir / ".lock"
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        report_path = audit_dir / "model-audit.json"
+        completed_path = audit_dir / "COMPLETED.json"
+        if completed_path.is_file():
+            completed = json.loads(completed_path.read_text())
+            if (
+                completed.get("audit_key") != key
+                or completed.get("report_sha256") != _sha256(report_path)
+            ):
+                raise RuntimeError("completed audit evidence changed")
+            return {
+                "state": "COMPLETED",
+                "audit_id": audit_dir.name,
+                "job_id": json.loads(
+                    (audit_dir / "control" / "submission.json").read_text()
+                )["job_id"],
+                "report": json.loads(report_path.read_text()),
+            }
+        receipt = audit_dir / "control" / "submission.json"
+        if receipt.is_file():
+            submission = json.loads(receipt.read_text())
+            job_id = str(submission.get("job_id", ""))
+            if not JOB_ID.fullmatch(job_id):
+                raise RuntimeError(submission.get("error", "audit submission is invalid"))
+            current = status(argparse.Namespace(job_id=job_id))
+            state = current["state"].split("+", 1)[0]
+            if state == "COMPLETED":
+                raise RuntimeError("audit job completed without immutable completion evidence")
+            if state in ENVIRONMENT_TERMINAL_STATES and (
+                audit_dir / "TEST_STARTED.json"
+            ).exists():
+                raise RuntimeError(
+                    "audit failed after final test started; manual reconciliation required"
+                )
+            return {"audit_id": audit_dir.name, **current}
+        if (audit_dir / "TEST_STARTED.json").exists():
+            raise RuntimeError(
+                "final test was already started; manual reconciliation required"
+            )
+        environment = manifest.get("environment", {})
+        environment_id = environment.get("environment_id")
+        environment_path = Path(str(environment.get("environment_path", "")))
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", str(environment_id or ""))
+            or environment_path != ENVIRONMENT_ROOT / str(environment_id)
+        ):
+            raise RuntimeError("training environment evidence is invalid")
+        environment_validate(argparse.Namespace(environment_id=environment_id))
+        account = manifest.get("account")
+        if account not in TRUSTED_ACCOUNTS or account != args.account:
+            raise RuntimeError("audit Slurm account is not allowlisted")
+        control = audit_dir / "control"
+        logs = audit_dir / "logs"
+        control.mkdir(exist_ok=True)
+        logs.mkdir(exist_ok=True)
+        request = {
+            "schema_version": 1,
+            "protocol_version": AUDIT_PROTOCOL_VERSION,
+            "audit_key": key,
+            "controller_run_id": run_dir.name,
+            "logged_model_id": logged_model_id,
+            "authorization": "explicit-final-test",
+        }
+        _atomic_json(control / "audit-request.json", request)
+        python = environment_path / "bin" / "python"
+        source = run_dir / "source"
+        command = " ".join(
+            shlex.quote(str(value))
+            for value in (
+                python,
+                "-m",
+                "dscnet.experiment.model_evaluation",
+                "--run-dir",
+                run_dir,
+                "--audit-dir",
+                audit_dir,
+                "--audit-key",
+                key,
+            )
+        )
+        script = f"""#!/usr/bin/env bash
+#SBATCH --job-name=dscnet-audit
+#SBATCH --output={audit_dir}/logs/slurm-%j.out
+#SBATCH --error={audit_dir}/logs/slurm-%j.err
+#SBATCH --account={account}
+#SBATCH --partition={AUDIT_PARTITION}
+#SBATCH --gpus={AUDIT_GPU_TYPE}:1
+#SBATCH --mem={AUDIT_MEMORY}
+#SBATCH --cpus-per-task={AUDIT_CPUS}
+#SBATCH --time={AUDIT_TIME}
+set -euo pipefail
+export PYTHONPATH={shlex.quote(str(source))}
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+{command}
+"""
+        (control / "job.sbatch").write_text(script)
+        submission = submit(
+            argparse.Namespace(
+                run_dir=str(audit_dir),
+                remote_root=str(ALLOWED_EXPERIMENT_ROOT),
+                account=account,
+                dependency_job_id=None,
+            )
+        )
+        return {
+            "state": "SUBMITTED",
+            "audit_id": audit_dir.name,
+            "audit_key": key,
+            "job_id": submission["job_id"],
+        }
+
+
 def status(args: argparse.Namespace) -> dict:
     queue = subprocess.run(
         ["squeue", "--noheader", "--jobs", args.job_id, "--format", "%T"],
@@ -1142,6 +1307,7 @@ def finalize(args: argparse.Namespace) -> dict:
     ] + [
         run_dir / "outputs" / "final-metrics.json",
         run_dir / "outputs" / "run-result.json",
+        run_dir / "outputs" / "validation-result.json",
     ]
     candidates.extend(
         path
@@ -1153,6 +1319,15 @@ def finalize(args: argparse.Namespace) -> dict:
             checkpoint = run_dir / "outputs" / "weights" / checkpoint_name
             if checkpoint not in candidates:
                 candidates.append(checkpoint)
+    comparison_root = run_dir / "outputs/predictions/_validation_comparisons"
+    if comparison_root.exists():
+        for path in sorted(comparison_root.rglob("*")):
+            if path.is_symlink():
+                raise RuntimeError("symlink in validation comparison artifacts")
+            if path.is_file() and path.suffix in {".json", ".csv", ".png", ".gz"}:
+                if any(part.startswith(".") for part in path.relative_to(comparison_root).parts):
+                    continue
+                candidates.append(path)
     artifacts = []
     for path in candidates:
         if (
@@ -1182,6 +1357,10 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--dataset-root", required=True)
     verify.add_argument("--splits", required=True)
     verify.add_argument("--expected-digest", required=True)
+    audit_parser = subparsers.add_parser("audit")
+    audit_parser.add_argument("--run-dir", required=True)
+    audit_parser.add_argument("--account", required=True)
+    audit_parser.add_argument("--authorization", required=True)
     submit_parser = subparsers.add_parser("submit")
     submit_parser.add_argument("--run-dir", required=True)
     submit_parser.add_argument("--remote-root", required=True)
@@ -1231,6 +1410,7 @@ def main() -> int:
         "environment-build": environment_build,
         "environment-validate": environment_validate,
         "submit": submit,
+        "audit": audit,
         "status": status,
         "cancel": cancel,
         "logs": logs,

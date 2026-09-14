@@ -52,6 +52,7 @@ class FakeTransport:
         self.remote_ui_deadline = None
         self.environment_status = "READY"
         self.environment_job_id = None
+        self.audit_response = None
 
     def ssh(self, host, argv):
         self.calls.append(("ssh", host, tuple(argv)))
@@ -94,6 +95,8 @@ class FakeTransport:
         if "ui-stop" in argv:
             self.remote_ui_running = False
             return CommandResult(0, json.dumps({"state": "off", "stopped": True}))
+        if "audit" in argv:
+            return CommandResult(0, json.dumps(self.audit_response or {}))
         if "verify-data" in argv:
             return CommandResult(0, json.dumps({"status": "verified"}))
         if "environment-ensure" in argv:
@@ -790,6 +793,8 @@ class ExpctlControllerTests(unittest.TestCase):
         command = launch.call_args.args[0]
         self.assertIn("127.0.0.1:5050:127.0.0.1:5000", command)
         self.assertIn("ExitOnForwardFailure=yes", command)
+        self.assertNotIn("-N", command)
+        self.assertEqual(command[-3:], ["xlogin1", "sleep", "60"])
         process.terminate.assert_called_once()
 
     def test_rsync_commands_support_the_system_rsync(self):
@@ -872,6 +877,207 @@ class ExpctlControllerTests(unittest.TestCase):
         self.assertEqual(set(fetched["artifacts"]), set(payloads))
         self.assertFalse(stale_remained)
         self.assertTrue(destination_exists)
+
+    def test_audit_requires_authorization_and_uses_only_the_run_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transport = FakeTransport()
+            controller = self._controller(root, transport)
+            record = controller._stage(EXPERIMENT, self.overrides)
+            record["action"] = "train"
+            (root / "runs" / record["run_id"] / "control" / "run-manifest.json").write_text(
+                json.dumps(record)
+            )
+            with self.assertRaisesRegex(ExpctlError, "authorize-final-test"):
+                controller.audit(record["run_id"], False)
+            self.assertEqual(transport.calls, [])
+            transport.audit_response = {
+                "state": "SUBMITTED",
+                "audit_id": f"{record['run_id']}-{'b' * 16}",
+                "audit_key": "b" * 64,
+                "job_id": "12345",
+            }
+            with patch.object(
+                controller,
+                "result",
+                return_value={"logged_model_id": "m-candidate"},
+            ):
+                result = controller.audit(record["run_id"], True)
+            self.assertEqual(result["state"], "SUBMITTED")
+            audit_calls = [
+                call for call in transport.calls if call[0] == "ssh" and "audit" in call[2]
+            ]
+            self.assertEqual(len(audit_calls), 1)
+            self.assertIn("I_AUTHORIZE_FINAL_TEST", audit_calls[0][2])
+
+    def test_real_finalize_fetch_result_and_complete_comparison_tree(self):
+        import argparse
+        import expctl_remote
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transport = FakeTransport()
+            controller = self._controller(root, transport)
+            record = controller.submit(EXPERIMENT, self.overrides)
+            record['action'] = 'train'
+            run_id = record['run_id']
+            (root / 'runs' / run_id / 'control/run-manifest.json').write_text(json.dumps(record))
+            remote = root / 'remote'
+            payloads = {
+                'control/resolved-config.yaml': b'action: train\n',
+                'control/dataset-manifest.json': b'{}',
+                'control/source-manifest.json': b'{}',
+                'control/source.tar.gz': b'source',
+                'control/git.json': b'{}',
+                'control/environment-lock.json': b'{}',
+                'control/run-manifest.json': json.dumps(record).encode(),
+                'control/submission.json': b'{"job_id":"12345"}',
+                'outputs/validation-result.json': json.dumps({
+                    'schema_version': 1, 'status': 'completed', 'controller_run_id': run_id,
+                    'training_run_id': 'a' * 32, 'experiment_digest': record['experiment_digest'],
+                    'logged_model_id': 'm-candidate',
+                    'checkpoint': {'name': record['best_checkpoint_name'], 'sha256': 'b' * 64},
+                    'selection': {'epoch': 70, 'metric': 'validation.dice', 'value': .86},
+                }).encode(),
+            }
+            prefix = 'outputs/predictions/_validation_comparisons/'
+            comparison_files = ['status.json', 'retained.json',
+                'epoch-70/masks/1.nii.gz', 'epoch-100/masks/1.nii.gz',
+                'epoch-70/per-volume.csv', 'epoch-100/per-volume.csv',
+                'epoch-70/evidence.json', 'epoch-100/evidence.json',
+                'comparison/figures/1-slices.png', 'comparison/slice-metrics.csv',
+                'comparison/figure-settings.json', 'comparison/status.json']
+            payloads.update({prefix + name: name.encode() for name in comparison_files})
+            for relative, value in payloads.items():
+                path = remote / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(value)
+            hidden = remote / prefix / '.render-interrupted/figures/partial.png'
+            hidden.parent.mkdir(parents=True); hidden.write_bytes(b'partial')
+            manifest = expctl_remote.finalize(argparse.Namespace(run_dir=str(remote),
+                best_checkpoint=None, latest_checkpoint=None))
+            self.assertEqual({a['path'] for a in manifest['artifacts']}, set(payloads))
+            expctl_remote.verify_artifacts(argparse.Namespace(run_dir=str(remote)))
+            transport.remote_files = {**payloads, 'control/artifacts.json': json.dumps(manifest).encode()}
+            fetched = controller.fetch(run_id)
+            self.assertEqual(set(fetched['artifacts']), set(payloads))
+            for relative, value in payloads.items():
+                self.assertEqual((Path(fetched['destination']) / relative).read_bytes(), value)
+            self.assertEqual(controller.result(run_id)['selection']['epoch'], 70)
+            (remote / prefix / 'epoch-70/masks/1.nii.gz').write_bytes(b'tampered')
+            with self.assertRaisesRegex(RuntimeError, 'changed'):
+                expctl_remote.verify_artifacts(argparse.Namespace(run_dir=str(remote)))
+
+    def test_result_returns_validation_only_selection_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            controller = self._controller(root)
+            record = controller._stage(EXPERIMENT, self.overrides)
+            run_id = record["run_id"]
+            record["action"] = "train"
+            manifest_path = root / "runs" / run_id / "control" / "run-manifest.json"
+            manifest_path.write_text(json.dumps(record))
+            fetched = root / "runs" / run_id / "fetched"
+            payloads = {
+                "control/run-manifest.json": json.dumps(record).encode(),
+                "outputs/validation-result.json": json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "completed",
+                        "controller_run_id": run_id,
+                        "training_run_id": "a" * 32,
+                        "experiment_digest": record["experiment_digest"],
+                        "logged_model_id": "m-candidate",
+                        "checkpoint": {
+                            "name": record["best_checkpoint_name"],
+                            "sha256": "b" * 64,
+                        },
+                        "selection": {
+                            "epoch": 70,
+                            "metric": "validation.dice",
+                            "value": 0.86,
+                        },
+                    }
+                ).encode(),
+            }
+            artifact_manifest = {
+                "schema_version": 1,
+                "artifacts": [
+                    {
+                        "path": path,
+                        "sha256": hashlib.sha256(value).hexdigest(),
+                        "size": len(value),
+                    }
+                    for path, value in payloads.items()
+                ],
+            }
+            for relative, value in payloads.items():
+                path = fetched / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(value)
+            (fetched / "control" / "artifacts.json").write_text(
+                json.dumps(artifact_manifest)
+            )
+
+            result = controller.result(run_id)
+
+            self.assertEqual(result["selection"]["value"], 0.86)
+            self.assertEqual(result["logged_model_id"], "m-candidate")
+            self.assertNotIn("test", json.dumps(result).lower())
+
+    def test_result_rejects_schema_expansion_and_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            controller = self._controller(root)
+            record = controller._stage(EXPERIMENT, self.overrides)
+            run_id = record["run_id"]
+            record["action"] = "train"
+            (root / "runs" / run_id / "control" / "run-manifest.json").write_text(
+                json.dumps(record)
+            )
+            fetched = root / "runs" / run_id / "fetched"
+            payloads = {
+                "control/run-manifest.json": json.dumps(record).encode(),
+                "outputs/validation-result.json": json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "completed",
+                        "controller_run_id": run_id,
+                        "training_run_id": "a" * 32,
+                        "experiment_digest": record["experiment_digest"],
+                        "logged_model_id": "m-candidate",
+                        "checkpoint": {
+                            "name": record["best_checkpoint_name"],
+                            "sha256": "b" * 64,
+                        },
+                        "selection": {
+                            "epoch": 70,
+                            "metric": "validation.dice",
+                            "value": 0.86,
+                        },
+                        "test": {"dice": 0.9},
+                    }
+                ).encode(),
+            }
+            artifact_manifest = {
+                "artifacts": [
+                    {
+                        "path": path,
+                        "sha256": hashlib.sha256(value).hexdigest(),
+                        "size": len(value),
+                    }
+                    for path, value in payloads.items()
+                ]
+            }
+            for relative, value in payloads.items():
+                path = fetched / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(value)
+            (fetched / "control" / "artifacts.json").write_text(
+                json.dumps(artifact_manifest)
+            )
+            with self.assertRaisesRegex(ExpctlError, "schema is invalid"):
+                controller.result(run_id)
+            (fetched / "outputs" / "validation-result.json").write_text("tampered")
+            with self.assertRaisesRegex(ExpctlError, "changed after retrieval"):
+                controller.result(run_id)
 
     def test_fetch_rejects_oversized_declared_artifact_before_transfer(self):
         with tempfile.TemporaryDirectory() as directory:

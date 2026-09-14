@@ -1424,6 +1424,10 @@ exit "$finalize_status"
             path = artifact.get("path", "")
             pure = PurePosixPath(path)
             allowed = path in allowed_exact or (
+                len(pure.parts) >= 4
+                and pure.parts[:3] == ("outputs", "predictions", "_validation_comparisons")
+                and pure.suffix in {".json", ".csv", ".png", ".gz"}
+            ) or (
                 len(pure.parts) == 2 and pure.parts[0] == "logs"
             ) or (
                 len(pure.parts) == 3
@@ -1516,6 +1520,146 @@ exit "$finalize_status"
         shutil.rmtree(backup, ignore_errors=True)
         return result
 
+    def _verified_fetched_path(self, run_id: str, relative: str) -> Path:
+        run_root = self.state_root / "runs" / run_id
+        fetched = run_root / "fetched"
+        manifest_path = fetched / "control" / "artifacts.json"
+        if not manifest_path.is_file():
+            raise ExpctlError("run must be fetched before reading its result")
+        if manifest_path.stat().st_size > MAX_ARTIFACT_MANIFEST_BYTES:
+            raise ExpctlError("fetched artifact manifest exceeds the size limit")
+        manifest = json.loads(manifest_path.read_text())
+        matches = [
+            item
+            for item in manifest.get("artifacts", [])
+            if item.get("path") == relative
+        ]
+        if len(matches) != 1:
+            raise ExpctlError(f"fetched run lacks one declared {relative}")
+        record = matches[0]
+        path = fetched / relative
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or not path.resolve().is_relative_to(fetched.resolve())
+            or path.stat().st_size != record.get("size")
+            or sha256_file(path) != record.get("sha256")
+        ):
+            raise ExpctlError(f"fetched artifact changed after retrieval: {relative}")
+        return path
+
+    def audit(self, run_id: str, authorize_final_test: bool) -> dict[str, Any]:
+        """Submit or inspect the at-most-once final-test audit for one training run."""
+        if not authorize_final_test:
+            raise ExpctlError(
+                "audit requires --authorize-final-test after the candidate is frozen"
+            )
+        _, record = self._record(run_id)
+        if record.get("action") != "train":
+            raise ExpctlError("audit accepts training runs only")
+        # This also requires a fetched, checksum-verified, validation-only result.
+        validation_result = self.result(run_id)
+        helper = f"{record['remote_run_dir']}/source/tools/expctl_remote.py"
+        remote = self.transport.ssh(
+            record["host"],
+            [
+                "python3",
+                helper,
+                "audit",
+                "--run-dir",
+                record["remote_run_dir"],
+                "--account",
+                record["account"],
+                "--authorization",
+                "I_AUTHORIZE_FINAL_TEST",
+            ],
+        )
+        payload = json.loads(_checked(remote, "remote model audit"))
+        audit_id = payload.get("audit_id")
+        if not isinstance(audit_id, str) or not re.fullmatch(
+            rf"{re.escape(run_id)}-[0-9a-f]{{16}}", audit_id
+        ):
+            raise ExpctlError("remote audit returned an invalid audit ID")
+        if payload.get("state") == "COMPLETED":
+            report = payload.get("report")
+            if (
+                not isinstance(report, dict)
+                or report.get("status") != "passed"
+                or report.get("controller_run_id") != run_id
+                or report.get("logged_model_id")
+                != validation_result.get("logged_model_id")
+                or report.get("registry_mutated") is not False
+                or report.get("champion_mutated") is not False
+            ):
+                raise ExpctlError("completed audit report is invalid")
+            destination = (
+                self.state_root / "runs" / run_id / "audits" / audit_id
+            )
+            destination.mkdir(parents=True, exist_ok=True)
+            _atomic_json(destination / "model-audit.json", report)
+        return payload
+
+    def result(self, run_id: str) -> dict[str, Any]:
+        """Return the dedicated validation-only result of a formal training run."""
+        _, controller_record = self._record(run_id)
+        if controller_record.get("action") != "train":
+            raise ExpctlError("result accepts training runs only")
+        manifest = json.loads(
+            self._verified_fetched_path(
+                run_id, "control/run-manifest.json"
+            ).read_text()
+        )
+        result = json.loads(
+            self._verified_fetched_path(
+                run_id, "outputs/validation-result.json"
+            ).read_text()
+        )
+        if (
+            manifest.get("run_id") != run_id
+            or manifest.get("action") != "train"
+            or manifest.get("experiment_digest")
+            != controller_record.get("experiment_digest")
+            or result.get("schema_version") != 1
+            or result.get("status") != "completed"
+            or result.get("controller_run_id") != run_id
+            or result.get("experiment_digest") != manifest.get("experiment_digest")
+        ):
+            raise ExpctlError("training result identity differs from controller evidence")
+        if set(result) != {
+            "schema_version",
+            "status",
+            "controller_run_id",
+            "training_run_id",
+            "experiment_digest",
+            "logged_model_id",
+            "checkpoint",
+            "selection",
+        }:
+            raise ExpctlError("training result schema is invalid")
+        training_run_id = result.get("training_run_id")
+        logged_model_id = result.get("logged_model_id")
+        checkpoint = result.get("checkpoint")
+        selection = result.get("selection")
+        if (
+            not isinstance(training_run_id, str)
+            or not re.fullmatch(r"[0-9a-f]{32}", training_run_id)
+            or not isinstance(logged_model_id, str)
+            or not logged_model_id.startswith("m-")
+            or not isinstance(checkpoint, dict)
+            or set(checkpoint) != {"name", "sha256"}
+            or checkpoint.get("name") != manifest.get("best_checkpoint_name")
+            or not re.fullmatch(r"[0-9a-f]{64}", str(checkpoint.get("sha256", "")))
+            or not isinstance(selection, dict)
+            or set(selection) != {"epoch", "metric", "value"}
+            or selection.get("metric") != "validation.dice"
+            or not isinstance(selection.get("epoch"), int)
+            or selection["epoch"] <= 0
+            or not isinstance(selection.get("value"), (int, float))
+            or not math.isfinite(float(selection["value"]))
+        ):
+            raise ExpctlError("training result evidence is invalid")
+        return result
+
 
 def _json_print(value: dict[str, Any]) -> None:
     print(json.dumps(value, indent=2, sort_keys=True))
@@ -1531,9 +1675,12 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--set", action="append", default=[])
         if command == "submit":
             child.add_argument("--retry", action="store_true")
-    for command in ("status", "cancel", "fetch"):
+    for command in ("status", "cancel", "fetch", "result"):
         child = subparsers.add_parser(command)
         child.add_argument("run_id")
+    audit_parser = subparsers.add_parser("audit")
+    audit_parser.add_argument("run_id")
+    audit_parser.add_argument("--authorize-final-test", action="store_true")
     log_parser = subparsers.add_parser("logs")
     log_parser.add_argument("run_id")
     log_parser.add_argument("--lines", type=int, default=200)
@@ -1573,6 +1720,8 @@ def main() -> int:
             result = controller.submit(args.experiment, args.set, args.retry)
         elif args.command == "logs":
             result = controller.logs(args.run_id, args.lines)
+        elif args.command == "audit":
+            result = controller.audit(args.run_id, args.authorize_final_test)
         elif args.command == "ui":
             if args.ui_command == "start":
                 result = controller.ui_start(args.local_port)

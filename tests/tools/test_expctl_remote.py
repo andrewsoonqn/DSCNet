@@ -107,6 +107,73 @@ class ExpctlRemoteTests(unittest.TestCase):
                         )
                     )
 
+    def test_audit_stages_one_run_scoped_final_test_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / "runs" / "abc"
+            (run / "control").mkdir(parents=True)
+            (run / "outputs").mkdir()
+            environment_id = "a" * 64
+            manifest = {
+                "run_id": "abc",
+                "action": "train",
+                "job_id": "12345",
+                "account": "test-account",
+                "environment": {
+                    "environment_id": environment_id,
+                    "environment_path": str(root.resolve() / "environments" / environment_id),
+                },
+            }
+            (run / "control" / "run-manifest.json").write_text(json.dumps(manifest))
+            (run / "outputs" / "validation-result.json").write_text(
+                json.dumps(
+                    {
+                        "controller_run_id": "abc",
+                        "logged_model_id": "m-one",
+                        "checkpoint": {"sha256": "b" * 64},
+                    }
+                )
+            )
+            with patch.object(expctl_remote, "ALLOWED_EXPERIMENT_ROOT", root.resolve()), patch.object(
+                expctl_remote, "ENVIRONMENT_ROOT", root.resolve() / "environments"
+            ), patch.object(
+                expctl_remote, "TRUSTED_ACCOUNTS", frozenset({"test-account"})
+            ), patch.object(
+                expctl_remote,
+                "status",
+                return_value={"job_id": "12345", "state": "COMPLETED"},
+            ), patch.object(expctl_remote, "verify_artifacts"), patch.object(
+                expctl_remote, "verify_source"
+            ), patch.object(expctl_remote, "environment_validate"), patch.object(
+                expctl_remote, "submit", return_value={"job_id": "67890"}
+            ):
+                result = expctl_remote.audit(
+                    argparse.Namespace(
+                        run_dir=str(run),
+                        account="test-account",
+                        authorization="I_AUTHORIZE_FINAL_TEST",
+                    )
+                )
+            audit_dir = root / "audits" / result["audit_id"]
+            request = json.loads(
+                (audit_dir / "control" / "audit-request.json").read_text()
+            )
+            script = (audit_dir / "control" / "job.sbatch").read_text()
+            self.assertEqual(result["state"], "SUBMITTED")
+            self.assertEqual(request["logged_model_id"], "m-one")
+            self.assertIn("dscnet.experiment.model_evaluation", script)
+            self.assertFalse((audit_dir / "TEST_STARTED.json").exists())
+
+    def test_audit_rejects_missing_explicit_authorization(self):
+        with self.assertRaisesRegex(RuntimeError, "authorization"):
+            expctl_remote.audit(
+                argparse.Namespace(
+                    run_dir="/tmp/run",
+                    account="allusers",
+                    authorization="",
+                )
+            )
+
     def test_status_falls_through_to_bounded_sacct_retries(self):
         responses = [
             self._completed(),
