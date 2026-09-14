@@ -775,7 +775,7 @@ class ExpctlControllerTests(unittest.TestCase):
             [call(1234, signal.SIGTERM), call(1234, signal.SIGKILL)],
         )
 
-    def test_tunnel_worker_forwards_only_loopback_and_ends_on_timeout(self):
+    def test_tunnel_worker_keeps_an_active_bounded_remote_channel(self):
         arguments = argparse.Namespace(
             host="xlogin1",
             local_port=5050,

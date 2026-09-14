@@ -526,10 +526,11 @@ def _run_tunnel_worker(args: argparse.Namespace) -> int:
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
-        "-N",
         "-L",
         f"127.0.0.1:{args.local_port}:127.0.0.1:{args.remote_port}",
         ALLOWED_HOST,
+        "sleep",
+        str(args.duration_seconds),
     ]
     process = subprocess.Popen(command)
     try:
