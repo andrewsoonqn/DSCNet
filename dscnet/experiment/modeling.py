@@ -29,6 +29,7 @@ from dscnet.experiment.config import (
 from dscnet.experiment.tracking import sha256_file
 from dscnet.models.factory import build_model
 from dscnet.training.checkpoints import load_model_checkpoint
+from dscnet.workflow import apply_reproducibility
 
 
 MODEL_PACKAGE_FORMAT_VERSION = 1
@@ -117,6 +118,9 @@ class DscnetPythonModel(mlflow.pyfunc.PythonModel):
     def load_context(self, context) -> None:
         config, _ = _load_typed_config(context.artifacts["resolved_config"])
         args = to_runtime_namespace(config)
+        apply_reproducibility(
+            args.seed, args.deterministic, args.deterministic_warn_only
+        )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = build_model(args, args.training_pipeline, self.device)
         load_model_checkpoint(

@@ -2,6 +2,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import mlflow
 from mlflow.exceptions import MlflowException
@@ -11,6 +13,7 @@ import torch
 
 from dscnet.experiment.config import load_experiment_config, to_runtime_namespace
 from dscnet.experiment.modeling import (
+    DscnetPythonModel,
     architecture_text,
     model_signature,
     save_model_package,
@@ -41,6 +44,41 @@ class ModelPackagingTests(unittest.TestCase):
         signature = model_signature(2)
         self.assertEqual(signature.inputs.inputs[0].shape, (-1, -1, -1))
         self.assertEqual(signature.outputs.inputs[0].shape, (2, -1, -1, -1))
+
+    def test_packaged_model_applies_frozen_reproducibility_before_building(self):
+        config, _, args = self._small_standard()
+        context = SimpleNamespace(
+            artifacts={
+                "resolved_config": "resolved.yaml",
+                "checkpoint": "best.pt",
+                "normalization": "normalization.npy",
+            }
+        )
+        model = MagicMock()
+        events = []
+        with patch(
+            "dscnet.experiment.modeling._load_typed_config",
+            return_value=(config, None),
+        ), patch(
+            "dscnet.experiment.modeling.apply_reproducibility",
+            side_effect=lambda *_: events.append("reproducibility"),
+        ) as reproducibility, patch(
+            "dscnet.experiment.modeling.torch.cuda.is_available", return_value=False
+        ), patch(
+            "dscnet.experiment.modeling.build_model",
+            side_effect=lambda *_: (events.append("build"), model)[1],
+        ), patch(
+            "dscnet.experiment.modeling.load_model_checkpoint"
+        ), patch(
+            "dscnet.experiment.modeling.load_normalization",
+            return_value=(0.5, 2.0),
+        ):
+            DscnetPythonModel().load_context(context)
+
+        reproducibility.assert_called_once_with(
+            args.seed, args.deterministic, args.deterministic_warn_only
+        )
+        self.assertEqual(events[:2], ["reproducibility", "build"])
 
     def test_package_round_trip_preserves_probabilities_and_human_architecture(self):
         _, resolved, args = self._small_standard()
