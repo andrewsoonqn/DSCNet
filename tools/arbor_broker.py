@@ -343,7 +343,7 @@ def _bounded_run(
 
 def _preflight_command(project_python: Path, worktree: Path, home: Path) -> list[str]:
     # This trusted script only parses candidate Python. Candidate imports and
-    # tests execute later, inside the cluster Landlock boundary.
+    # tests execute later inside the cluster process boundary.
     return [str(project_python), str(worktree / "tools" / "arbor_preflight.py")]
 
 

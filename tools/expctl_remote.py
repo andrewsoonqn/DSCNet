@@ -66,29 +66,6 @@ ENVIRONMENT_TERMINAL_STATES = frozenset(
     }
 )
 
-LANDLOCK_CREATE_RULESET_VERSION = 1
-LANDLOCK_RULE_PATH_BENEATH = 1
-LANDLOCK_RULE_NET_PORT = 2
-LANDLOCK_ACCESS_FS_EXECUTE = 1 << 0
-LANDLOCK_ACCESS_FS_WRITE_FILE = 1 << 1
-LANDLOCK_ACCESS_FS_READ_FILE = 1 << 2
-LANDLOCK_ACCESS_FS_READ_DIR = 1 << 3
-LANDLOCK_ACCESS_FS_REMOVE_DIR = 1 << 4
-LANDLOCK_ACCESS_FS_REMOVE_FILE = 1 << 5
-LANDLOCK_ACCESS_FS_MAKE_CHAR = 1 << 6
-LANDLOCK_ACCESS_FS_MAKE_DIR = 1 << 7
-LANDLOCK_ACCESS_FS_MAKE_REG = 1 << 8
-LANDLOCK_ACCESS_FS_MAKE_SOCK = 1 << 9
-LANDLOCK_ACCESS_FS_MAKE_FIFO = 1 << 10
-LANDLOCK_ACCESS_FS_MAKE_BLOCK = 1 << 11
-LANDLOCK_ACCESS_FS_MAKE_SYM = 1 << 12
-LANDLOCK_ACCESS_FS_REFER = 1 << 13
-LANDLOCK_ACCESS_FS_TRUNCATE = 1 << 14
-LANDLOCK_ACCESS_NET_BIND_TCP = 1 << 0
-LANDLOCK_ACCESS_NET_CONNECT_TCP = 1 << 1
-LANDLOCK_FS_READ = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
-LANDLOCK_FS_WRITE = (LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK | LANDLOCK_ACCESS_FS_MAKE_SYM | LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE)
-LANDLOCK_FS_FILE = (LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_TRUNCATE)
 PR_SET_NO_NEW_PRIVS = 38
 PR_SET_SECCOMP = 22
 SECCOMP_MODE_FILTER = 2
@@ -203,17 +180,6 @@ def verify_data(args: argparse.Namespace) -> dict:
     return {"status": "verified", "dataset_digest": actual, "splits": splits}
 
 
-class _LandlockRulesetAttr(ctypes.Structure):
-    _fields_ = [
-        ("handled_access_fs", ctypes.c_uint64),
-        ("handled_access_net", ctypes.c_uint64),
-    ]
-
-
-class _LandlockPathBeneathAttr(ctypes.Structure):
-    _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int)]
-
-
 class _SockFilter(ctypes.Structure):
     _fields_ = [
         ("code", ctypes.c_ushort),
@@ -225,15 +191,6 @@ class _SockFilter(ctypes.Structure):
 
 class _SockFprog(ctypes.Structure):
     _fields_ = [("length", ctypes.c_ushort), ("filter", ctypes.POINTER(_SockFilter))]
-
-
-def _landlock_syscall(number: int, *arguments: object) -> int:
-    libc = ctypes.CDLL(None, use_errno=True)
-    result = libc.syscall(number, *arguments)
-    if result < 0:
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error))
-    return int(result)
 
 
 def _deny_non_unix_sockets(libc: object) -> None:
@@ -263,76 +220,25 @@ def _deny_non_unix_sockets(libc: object) -> None:
         raise RuntimeError(f"seccomp network filter failed: {os.strerror(error)}")
 
 
-def _apply_landlock(read_only: list[Path], read_write: list[Path]) -> None:
-    """Install fail-closed ABI-v4 filesystem/TCP and seccomp IP-socket policies."""
-    if sys.platform != "linux":
-        raise RuntimeError("isolated execution requires Linux Landlock")
-    try:
-        abi = _landlock_syscall(444, 0, 0, LANDLOCK_CREATE_RULESET_VERSION)
-    except OSError as error:
-        raise RuntimeError("Landlock is unavailable") from error
-    if abi < 4:
-        raise RuntimeError(f"Landlock ABI 4 or newer is required (found {abi})")
-    handled_fs = LANDLOCK_FS_READ | LANDLOCK_FS_WRITE
-    attributes = _LandlockRulesetAttr(
-        handled_access_fs=handled_fs,
-        handled_access_net=LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP,
-    )
-    try:
-        ruleset = _landlock_syscall(
-            444, ctypes.byref(attributes), ctypes.sizeof(attributes), 0
-        )
-        for path, access in [
-            *((item, LANDLOCK_FS_READ) for item in read_only),
-            *((item, handled_fs) for item in read_write),
-        ]:
-            if not path.exists() or path.is_symlink():
-                raise RuntimeError(f"Landlock allowlisted path is unsafe or absent: {path}")
-            descriptor = os.open(path, os.O_PATH | os.O_CLOEXEC)
-            try:
-                effective_access = access if path.is_dir() else access & LANDLOCK_FS_FILE
-                rule = _LandlockPathBeneathAttr(
-                    allowed_access=effective_access, parent_fd=descriptor
-                )
-                _landlock_syscall(
-                    445,
-                    ruleset,
-                    LANDLOCK_RULE_PATH_BENEATH,
-                    ctypes.byref(rule),
-                    0,
-                )
-            finally:
-                os.close(descriptor)
-        libc = ctypes.CDLL(None, use_errno=True)
-        if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
-            error = ctypes.get_errno()
-            raise OSError(error, os.strerror(error))
-        _landlock_syscall(446, ruleset, 0)
-        _deny_non_unix_sockets(libc)
-    except Exception:
-        if "ruleset" in locals():
-            os.close(ruleset)
-        raise
-    os.close(ruleset)
-
-
-def _device_write_paths() -> list[Path]:
-    candidates = [
-        Path("/dev/null"),
-        Path("/dev/zero"),
-        Path("/dev/random"),
-        Path("/dev/urandom"),
-        *Path("/dev").glob("nvidia*"),
-        *Path("/dev/nvidia-caps").glob("*"),
-        *Path("/dev/dri").glob("*"),
-    ]
-    return [
-        path
-        for path in dict.fromkeys(candidates)
-        if path.exists()
-        and not path.is_symlink()
-        and stat.S_ISCHR(path.stat().st_mode)
-    ]
+def _close_inherited_descriptors() -> None:
+    descriptor_root = Path("/proc/self/fd")
+    if descriptor_root.is_dir():
+        descriptors = [
+            int(path.name)
+            for path in descriptor_root.iterdir()
+            if path.name.isdigit() and int(path.name) > 2
+        ]
+    else:
+        descriptor_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        if descriptor_limit == resource.RLIM_INFINITY:
+            raise RuntimeError("cannot bound inherited file descriptors")
+        descriptors = list(range(3, int(descriptor_limit)))
+    for descriptor in descriptors:
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
 
 
 def _isolated_environment(
@@ -357,7 +263,7 @@ def _isolated_environment(
 
 
 def run_isolated(args: argparse.Namespace) -> dict:
-    """Apply the fixed Arbor validation sandbox, then replace this process."""
+    """Apply the fixed Arbor process boundary, then replace this process."""
     run_dir = Path(args.run_dir).absolute()
     allowed_parent = ALLOWED_EXPERIMENT_ROOT / "runs"
     if (
@@ -380,29 +286,10 @@ def run_isolated(args: argparse.Namespace) -> dict:
     home, temporary, cache = sandbox / "home", sandbox / "tmp", sandbox / "cache"
     for path in (home, temporary, cache):
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    system_paths = list(
-        dict.fromkeys(
-            Path(path).resolve()
-            for path in ("/usr", "/bin", "/lib", "/lib64", "/etc", "/dev", "/proc", "/sys")
-            if Path(path).exists()
-        )
-    )
-    _apply_landlock(
-        [source, run_dir / "control", environment, dataset / "train", dataset / "val", *system_paths],
-        [
-            run_dir / "outputs",
-            run_dir / "logs",
-            *([Path("/dev/shm")] if Path("/dev/shm").is_dir() else []),
-            *_device_write_paths(),
-        ],
-    )
-    descriptor_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
-    close_until = (
-        1_048_576
-        if descriptor_limit == resource.RLIM_INFINITY
-        else min(int(descriptor_limit), 1_048_576)
-    )
-    os.closerange(3, close_until)
+    if sys.platform != "linux":
+        raise RuntimeError("isolated execution requires the Linux cluster")
+    _deny_non_unix_sockets(ctypes.CDLL(None, use_errno=True))
+    _close_inherited_descriptors()
     keep = _isolated_environment(environment, home, temporary, cache)
     preflight = source / "tools" / "arbor_preflight.py"
     if preflight.is_symlink() or not preflight.is_file():

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate candidate source, optionally running focused tests under Landlock."""
+"""Validate candidate syntax locally or run focused tests on the cluster."""
 
 from __future__ import annotations
 

@@ -244,40 +244,11 @@ class ExpctlRemoteTests(unittest.TestCase):
                 ]
             )
 
-    @unittest.skipUnless(sys.platform == "linux", "Landlock is Linux-only")
-    def test_landlock_fail_closed_when_abi_is_unavailable(self):
-        with patch("expctl_remote._landlock_syscall", side_effect=OSError("missing")):
-            with self.assertRaisesRegex(RuntimeError, "unavailable"):
-                expctl_remote._apply_landlock([], [])
-
-    @unittest.skipUnless(sys.platform == "linux", "Landlock is Linux-only")
-    def test_landlock_denies_unexposed_filesystem(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            allowed = root / "allowed"
-            denied = root / "denied"
-            allowed.mkdir()
-            denied.write_text("secret")
-            code = (
-                "import sys; from pathlib import Path; import expctl_remote; "
-                "allowed=Path(sys.argv[1]); denied=Path(sys.argv[2]); "
-                "expctl_remote._apply_landlock([allowed], []); "
-                "\ntry: denied.read_text()\nexcept PermissionError: raise SystemExit(0)\n"
-                "raise SystemExit(1)"
-            )
-            completed = subprocess.run(
-                [sys.executable, "-c", code, str(allowed), str(denied)],
-                cwd=REPO_ROOT / "tools", check=False, capture_output=True, text=True,
-            )
-        if "Landlock is unavailable" in completed.stderr or "ABI 4" in completed.stderr:
-            self.skipTest("host Landlock ABI is unavailable")
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-
     @unittest.skipUnless(sys.platform == "linux", "seccomp is Linux-only")
     def test_isolation_denies_ip_sockets_but_allows_unix_sockets(self):
         code = (
-            "import socket; from pathlib import Path; import expctl_remote; "
-            "expctl_remote._apply_landlock([Path('/usr'), Path('/etc')], []); "
+            "import ctypes, socket; import expctl_remote; "
+            "expctl_remote._deny_non_unix_sockets(ctypes.CDLL(None, use_errno=True)); "
             "socket.socket(socket.AF_UNIX, socket.SOCK_STREAM).close(); "
             "left,right=socket.socketpair(socket.AF_UNIX); left.close(); right.close(); "
             "\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n"
@@ -287,7 +258,7 @@ class ExpctlRemoteTests(unittest.TestCase):
             "try: socket.socketpair(socket.AF_TIPC, socket.SOCK_STREAM)\n"
             "except PermissionError: pass\n"
             "else: raise SystemExit(2)\n"
-            "import ctypes, errno; libc=ctypes.CDLL(None, use_errno=True)\n"
+            "import errno; libc=ctypes.CDLL(None, use_errno=True)\n"
             "for number in (0x40000000 | 41, 425):\n"
             " ctypes.set_errno(0); result=libc.syscall(number, 0, 0, 0)\n"
             " if result != -1 or ctypes.get_errno() != errno.EPERM: raise SystemExit(3)\n"
@@ -297,8 +268,23 @@ class ExpctlRemoteTests(unittest.TestCase):
             [sys.executable, "-c", code],
             cwd=REPO_ROOT / "tools", check=False, capture_output=True, text=True,
         )
-        if "Landlock is unavailable" in completed.stderr or "ABI 4" in completed.stderr:
-            self.skipTest("host Landlock ABI is unavailable")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_close_inherited_descriptors_closes_open_child_fd(self):
+        code = (
+            "import os, tempfile, expctl_remote; "
+            "fd=os.open(tempfile.mktemp(), os.O_CREAT | os.O_WRONLY, 0o600); "
+            "expctl_remote._close_inherited_descriptors(); "
+            "\ntry: os.fstat(fd)\nexcept OSError: raise SystemExit(0)\n"
+            "raise SystemExit(1)"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=REPO_ROOT / "tools",
+            check=False,
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_isolated_environment_keeps_required_gpu_ordinal_only(self):

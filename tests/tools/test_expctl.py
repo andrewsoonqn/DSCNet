@@ -318,7 +318,7 @@ class ExpctlControllerTests(unittest.TestCase):
         self.assertNotIn("DSCNetEnv", script)
         self.assertNotIn("workflow.py", script)
 
-    def test_isolated_job_uses_trusted_remote_landlock_wrapper(self):
+    def test_isolated_job_uses_trusted_remote_process_wrapper(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             record = self._controller(root)._stage(
