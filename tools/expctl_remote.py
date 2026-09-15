@@ -335,6 +335,27 @@ def _device_write_paths() -> list[Path]:
     ]
 
 
+def _isolated_environment(
+    environment: Path, home: Path, temporary: Path, cache: Path
+) -> dict[str, str]:
+    keep = {
+        key: value
+        for key, value in os.environ.items()
+        if key == "GPU_DEVICE_ORDINAL"
+        or key.startswith(("DSCNET_", "SLURM_", "CUDA_", "NVIDIA_"))
+    }
+    keep.update(
+        {
+            "HOME": str(home),
+            "TMPDIR": str(temporary),
+            "XDG_CACHE_HOME": str(cache),
+            "PATH": f"{environment / 'bin'}:/usr/bin:/bin",
+            "PYTHONNOUSERSITE": "1",
+        }
+    )
+    return keep
+
+
 def run_isolated(args: argparse.Namespace) -> dict:
     """Apply the fixed Arbor validation sandbox, then replace this process."""
     run_dir = Path(args.run_dir).absolute()
@@ -382,20 +403,7 @@ def run_isolated(args: argparse.Namespace) -> dict:
         else min(int(descriptor_limit), 1_048_576)
     )
     os.closerange(3, close_until)
-    keep = {
-        key: value
-        for key, value in os.environ.items()
-        if key.startswith(("DSCNET_", "SLURM_", "CUDA_", "NVIDIA_"))
-    }
-    keep.update(
-        {
-            "HOME": str(home),
-            "TMPDIR": str(temporary),
-            "XDG_CACHE_HOME": str(cache),
-            "PATH": f"{environment / 'bin'}:/usr/bin:/bin",
-            "PYTHONNOUSERSITE": "1",
-        }
-    )
+    keep = _isolated_environment(environment, home, temporary, cache)
     preflight = source / "tools" / "arbor_preflight.py"
     if preflight.is_symlink() or not preflight.is_file():
         raise RuntimeError("isolated candidate preflight is unsafe or absent")

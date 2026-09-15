@@ -301,6 +301,23 @@ class ExpctlRemoteTests(unittest.TestCase):
             self.skipTest("host Landlock ABI is unavailable")
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_isolated_environment_keeps_required_gpu_ordinal_only(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "GPU_DEVICE_ORDINAL": "0",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "SSH_AUTH_SOCK": "secret",
+            },
+            clear=True,
+        ):
+            environment = expctl_remote._isolated_environment(
+                Path("/environment"), Path("/home"), Path("/tmp"), Path("/cache")
+            )
+        self.assertEqual(environment["GPU_DEVICE_ORDINAL"], "0")
+        self.assertEqual(environment["CUDA_VISIBLE_DEVICES"], "0")
+        self.assertNotIn("SSH_AUTH_SOCK", environment)
+
     def test_cancel_is_idempotent_for_terminal_job(self):
         with patch(
             "expctl_remote.subprocess.run",
