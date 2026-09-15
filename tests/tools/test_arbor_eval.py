@@ -53,6 +53,7 @@ class ArborEvaluationTests(unittest.TestCase):
         self.assertIn("action=train", submit)
         self.assertIn("runtime.formal=true", submit)
         self.assertIn("runtime.allow_dirty=false", submit)
+        self.assertIn("runtime.mlflow.isolated_run_store=true", submit)
         invoked_operations = [call.args[0][2] for call in command.call_args_list]
         self.assertEqual(
             invoked_operations, ["submit", "status", "status", "fetch", "result"]

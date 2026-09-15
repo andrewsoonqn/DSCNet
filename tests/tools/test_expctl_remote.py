@@ -174,6 +174,24 @@ class ExpctlRemoteTests(unittest.TestCase):
                 )
             )
 
+    def test_audit_rejects_isolated_research_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / "runs" / ("a" * 16)
+            control = run / "control"
+            control.mkdir(parents=True)
+            (control / "run-manifest.json").write_text(
+                json.dumps({"run_id": run.name, "action": "train", "isolated_run_store": True})
+            )
+            with patch.object(expctl_remote, "ALLOWED_EXPERIMENT_ROOT", root.resolve()):
+                with self.assertRaisesRegex(RuntimeError, "validation-only"):
+                    expctl_remote.audit(
+                        argparse.Namespace(
+                            run_dir=str(run), account="allusers",
+                            authorization="I_AUTHORIZE_FINAL_TEST",
+                        )
+                    )
+
     def test_status_falls_through_to_bounded_sacct_retries(self):
         responses = [
             self._completed(),
@@ -189,6 +207,99 @@ class ExpctlRemoteTests(unittest.TestCase):
         self.assertEqual(result["state"], "COMPLETED")
         self.assertEqual(command.call_count, 4)
         self.assertEqual(sleep.call_count, 2)
+
+    def test_status_falls_back_when_squeue_rejects_aged_job(self):
+        responses = [
+            self._completed(code=1, stderr="Invalid job id specified"),
+            self._completed(stdout="COMPLETED|\n"),
+        ]
+        with patch("expctl_remote.subprocess.run", side_effect=responses) as command:
+            result = expctl_remote.status(argparse.Namespace(job_id="12345"))
+        self.assertEqual(result["source"], "sacct")
+        self.assertEqual(result["state"], "COMPLETED")
+        self.assertEqual(command.call_count, 2)
+
+    def test_status_rejects_unrelated_squeue_failure_without_sacct(self):
+        with patch(
+            "expctl_remote.subprocess.run",
+            return_value=self._completed(code=1, stderr="slurm controller unavailable"),
+        ) as command:
+            with self.assertRaisesRegex(RuntimeError, "controller unavailable"):
+                expctl_remote.status(argparse.Namespace(job_id="12345"))
+        self.assertEqual(command.call_count, 1)
+
+    def test_isolated_parser_accepts_only_fixed_run_inputs(self):
+        args = expctl_remote.build_parser().parse_args(
+            [
+                "run-isolated", "--run-dir", "/run", "--environment-id", "a" * 64,
+                "--dataset-root", "/data",
+            ]
+        )
+        self.assertEqual(args.command, "run-isolated")
+        with self.assertRaises(SystemExit):
+            expctl_remote.build_parser().parse_args(
+                [
+                    "run-isolated", "--run-dir", "/run", "--environment-id", "a" * 64,
+                    "--dataset-root", "/data", "--command", "sh",
+                ]
+            )
+
+    @unittest.skipUnless(sys.platform == "linux", "Landlock is Linux-only")
+    def test_landlock_fail_closed_when_abi_is_unavailable(self):
+        with patch("expctl_remote._landlock_syscall", side_effect=OSError("missing")):
+            with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                expctl_remote._apply_landlock([], [])
+
+    @unittest.skipUnless(sys.platform == "linux", "Landlock is Linux-only")
+    def test_landlock_denies_unexposed_filesystem(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            allowed = root / "allowed"
+            denied = root / "denied"
+            allowed.mkdir()
+            denied.write_text("secret")
+            code = (
+                "import sys; from pathlib import Path; import expctl_remote; "
+                "allowed=Path(sys.argv[1]); denied=Path(sys.argv[2]); "
+                "expctl_remote._apply_landlock([allowed], []); "
+                "\ntry: denied.read_text()\nexcept PermissionError: raise SystemExit(0)\n"
+                "raise SystemExit(1)"
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", code, str(allowed), str(denied)],
+                cwd=REPO_ROOT / "tools", check=False, capture_output=True, text=True,
+            )
+        if "Landlock is unavailable" in completed.stderr or "ABI 4" in completed.stderr:
+            self.skipTest("host Landlock ABI is unavailable")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    @unittest.skipUnless(sys.platform == "linux", "seccomp is Linux-only")
+    def test_isolation_denies_ip_sockets_but_allows_unix_sockets(self):
+        code = (
+            "import socket; from pathlib import Path; import expctl_remote; "
+            "expctl_remote._apply_landlock([Path('/usr'), Path('/etc')], []); "
+            "socket.socket(socket.AF_UNIX, socket.SOCK_STREAM).close(); "
+            "left,right=socket.socketpair(socket.AF_UNIX); left.close(); right.close(); "
+            "\nfor kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):\n"
+            " try: socket.socket(socket.AF_INET, kind)\n"
+            " except PermissionError: continue\n"
+            " raise SystemExit(1)\n"
+            "try: socket.socketpair(socket.AF_TIPC, socket.SOCK_STREAM)\n"
+            "except PermissionError: pass\n"
+            "else: raise SystemExit(2)\n"
+            "import ctypes, errno; libc=ctypes.CDLL(None, use_errno=True)\n"
+            "for number in (0x40000000 | 41, 425):\n"
+            " ctypes.set_errno(0); result=libc.syscall(number, 0, 0, 0)\n"
+            " if result != -1 or ctypes.get_errno() != errno.EPERM: raise SystemExit(3)\n"
+            "raise SystemExit(0)"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=REPO_ROOT / "tools", check=False, capture_output=True, text=True,
+        )
+        if "Landlock is unavailable" in completed.stderr or "ABI 4" in completed.stderr:
+            self.skipTest("host Landlock ABI is unavailable")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_cancel_is_idempotent_for_terminal_job(self):
         with patch(

@@ -38,7 +38,9 @@ coordinator:
     - tests/tools/**
     - tests/training/test_checkpoints.py
     - tests/training/test_validation_retention.py
+    - tools/arbor_broker.py
     - tools/arbor_eval.py
+    - tools/arbor_preflight.py
     - tools/expctl.py
     - tools/expctl_remote.py
     - uv.lock
@@ -48,13 +50,14 @@ coordinator:
     mode: fixed-cycles
     require_cost_estimate: true
     max_parallel_executors: 1
+  evaluation:
+    tool: submit_candidate
+    isolated_run_store: true
+    validation_only: true
   search:
     enabled: false
 
 executor:
-  experiment_cmd: >-
-    DSCNET_ARBOR_DATA_DIR=/Users/andrewsoon/dev/urop/data/minivess-half
-    uv run --locked python tools/arbor_eval.py
   max_turns: 50
   auto_git: true
   git_branch_prefix: arbor/dscnet-pilot

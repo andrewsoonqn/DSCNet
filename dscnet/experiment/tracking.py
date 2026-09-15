@@ -105,11 +105,15 @@ def build_consumed_split_manifest(args, action: str) -> dict[str, Any]:
     return manifest
 
 
-def build_dataset_manifest(data_dir: str | Path) -> dict[str, Any]:
-    """Hash every paired MiniVess file before preparation creates text manifests."""
+def build_dataset_manifest(
+    data_dir: str | Path, *, splits: tuple[str, ...] = ("train", "val", "test")
+) -> dict[str, Any]:
+    """Hash the requested paired MiniVess splits before creating text manifests."""
+    if not splits or any(split not in {"train", "val", "test"} for split in splits):
+        raise ValueError("dataset manifest splits are invalid")
     root = Path(data_dir).resolve()
     manifest: dict[str, Any] = {"root": str(root), "splits": {}}
-    for split in ("train", "val", "test"):
+    for split in splits:
         image_dir = root / split / "image"
         label_dir = root / split / "label"
         images = {path.name: path for path in image_dir.glob("*.nii*") if path.is_file()}

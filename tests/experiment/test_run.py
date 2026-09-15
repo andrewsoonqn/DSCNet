@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from dscnet.experiment.run import (
     _control_evidence,
     _execute,
     _identity_config_yaml,
+    _mlflow_store,
     run_configured_experiment,
 )
 
@@ -37,6 +39,14 @@ class FakeRecorder:
 
 
 class ExperimentRunTests(unittest.TestCase):
+    def test_isolated_mlflow_fails_closed_without_control_directory(self):
+        config, _ = load_experiment_config(
+            overrides=["runtime.mlflow.isolated_run_store=true"]
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "DSCNET_CONTROL_DIR"):
+                _mlflow_store(config.runtime.mlflow)
+
     def _dataset(self, root):
         for split in ("train", "val", "test"):
             image_dir = root / split / "image"

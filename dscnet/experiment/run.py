@@ -50,6 +50,23 @@ def _artifact_root(path: str, repo_root: Path) -> Path:
     return root if root.is_absolute() else repo_root / root
 
 
+def _mlflow_store(config) -> tuple[str, Path]:
+    """Resolve the tracking store, isolating Arbor formal runs from central MLflow."""
+    if config.isolated_run_store:
+        control_value = os.environ.get("DSCNET_CONTROL_DIR")
+        if not control_value:
+            raise RuntimeError("isolated MLflow requires DSCNET_CONTROL_DIR")
+        control = Path(control_value).resolve()
+        run_root = control.parent
+        outputs = run_root / "outputs" / "mlflow"
+        outputs.mkdir(parents=True, exist_ok=True)
+        return f"sqlite:///{outputs / 'mlflow.db'}", outputs / "artifacts"
+    return (
+        _tracking_uri(config.tracking_uri, REPO_ROOT),
+        _artifact_root(config.artifact_root, REPO_ROOT),
+    )
+
+
 def _dataset_manifest(config, args):
     if config.action == "prepare":
         data_root = Path(config.data.data_dir)
@@ -185,11 +202,12 @@ def _execute(config, resolved, parent_run_id: str | None = None) -> dict[str, st
         )
     args.config_digest = digest
     mlflow_config = config.runtime.mlflow
+    tracking_uri, artifact_root = _mlflow_store(mlflow_config)
     final_metrics: dict[str, float] = {}
     with RunRecorder(
-        tracking_uri=_tracking_uri(mlflow_config.tracking_uri, REPO_ROOT),
+        tracking_uri=tracking_uri,
         experiment_name=mlflow_config.experiment_name,
-        artifact_root=_artifact_root(mlflow_config.artifact_root, REPO_ROOT),
+        artifact_root=artifact_root,
         run_name=f"{config.data.run_label}-{config.action}",
         resolved_config=resolved,
         repo_root=REPO_ROOT,

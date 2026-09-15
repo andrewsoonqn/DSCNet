@@ -5,13 +5,17 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import platform
 import re
+import resource
 import secrets
 import shlex
 import signal
@@ -61,6 +65,49 @@ ENVIRONMENT_TERMINAL_STATES = frozenset(
         "TIMEOUT",
     }
 )
+
+LANDLOCK_CREATE_RULESET_VERSION = 1
+LANDLOCK_RULE_PATH_BENEATH = 1
+LANDLOCK_RULE_NET_PORT = 2
+LANDLOCK_ACCESS_FS_EXECUTE = 1 << 0
+LANDLOCK_ACCESS_FS_WRITE_FILE = 1 << 1
+LANDLOCK_ACCESS_FS_READ_FILE = 1 << 2
+LANDLOCK_ACCESS_FS_READ_DIR = 1 << 3
+LANDLOCK_ACCESS_FS_REMOVE_DIR = 1 << 4
+LANDLOCK_ACCESS_FS_REMOVE_FILE = 1 << 5
+LANDLOCK_ACCESS_FS_MAKE_CHAR = 1 << 6
+LANDLOCK_ACCESS_FS_MAKE_DIR = 1 << 7
+LANDLOCK_ACCESS_FS_MAKE_REG = 1 << 8
+LANDLOCK_ACCESS_FS_MAKE_SOCK = 1 << 9
+LANDLOCK_ACCESS_FS_MAKE_FIFO = 1 << 10
+LANDLOCK_ACCESS_FS_MAKE_BLOCK = 1 << 11
+LANDLOCK_ACCESS_FS_MAKE_SYM = 1 << 12
+LANDLOCK_ACCESS_FS_REFER = 1 << 13
+LANDLOCK_ACCESS_FS_TRUNCATE = 1 << 14
+LANDLOCK_ACCESS_NET_BIND_TCP = 1 << 0
+LANDLOCK_ACCESS_NET_CONNECT_TCP = 1 << 1
+LANDLOCK_FS_READ = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+LANDLOCK_FS_WRITE = (LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK | LANDLOCK_ACCESS_FS_MAKE_SYM | LANDLOCK_ACCESS_FS_REFER | LANDLOCK_ACCESS_FS_TRUNCATE)
+LANDLOCK_FS_FILE = (LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_TRUNCATE)
+PR_SET_NO_NEW_PRIVS = 38
+PR_SET_SECCOMP = 22
+SECCOMP_MODE_FILTER = 2
+AUDIT_ARCH_X86_64 = 0xC000003E
+SYS_SOCKET_X86_64 = 41
+SYS_SOCKETPAIR_X86_64 = 53
+SYS_IO_URING_SETUP_X86_64 = 425
+X32_SYSCALL_BIT = 0x40000000
+BPF_LD = 0x00
+BPF_W = 0x00
+BPF_ABS = 0x20
+BPF_JMP = 0x05
+BPF_JEQ = 0x10
+BPF_JSET = 0x40
+BPF_K = 0x00
+BPF_RET = 0x06
+SECCOMP_RET_KILL_PROCESS = 0x80000000
+SECCOMP_RET_ALLOW = 0x7FFF0000
+SECCOMP_RET_ERRNO = 0x00050000
 
 
 def _job_id(value: str) -> str:
@@ -154,6 +201,213 @@ def verify_data(args: argparse.Namespace) -> dict:
             f"remote dataset digest mismatch: expected {args.expected_digest}, got {actual}"
         )
     return {"status": "verified", "dataset_digest": actual, "splits": splits}
+
+
+class _LandlockRulesetAttr(ctypes.Structure):
+    _fields_ = [
+        ("handled_access_fs", ctypes.c_uint64),
+        ("handled_access_net", ctypes.c_uint64),
+    ]
+
+
+class _LandlockPathBeneathAttr(ctypes.Structure):
+    _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int)]
+
+
+class _SockFilter(ctypes.Structure):
+    _fields_ = [
+        ("code", ctypes.c_ushort),
+        ("jt", ctypes.c_ubyte),
+        ("jf", ctypes.c_ubyte),
+        ("k", ctypes.c_uint32),
+    ]
+
+
+class _SockFprog(ctypes.Structure):
+    _fields_ = [("length", ctypes.c_ushort), ("filter", ctypes.POINTER(_SockFilter))]
+
+
+def _landlock_syscall(number: int, *arguments: object) -> int:
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.syscall(number, *arguments)
+    if result < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return int(result)
+
+
+def _deny_non_unix_sockets(libc: object) -> None:
+    """Deny creation of every socket family except local AF_UNIX sockets."""
+    if platform.machine().lower() not in {"x86_64", "amd64"}:
+        raise RuntimeError("network isolation requires the supported x86-64 cluster")
+    filters = (_SockFilter * 12)(
+        _SockFilter(BPF_LD | BPF_W | BPF_ABS, 0, 0, 4),
+        _SockFilter(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, AUDIT_ARCH_X86_64),
+        _SockFilter(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
+        _SockFilter(BPF_LD | BPF_W | BPF_ABS, 0, 0, 0),
+        _SockFilter(BPF_JMP | BPF_JSET | BPF_K, 5, 0, X32_SYSCALL_BIT),
+        _SockFilter(BPF_JMP | BPF_JEQ | BPF_K, 4, 0, SYS_IO_URING_SETUP_X86_64),
+        _SockFilter(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, SYS_SOCKET_X86_64),
+        _SockFilter(BPF_JMP | BPF_JEQ | BPF_K, 0, 3, SYS_SOCKETPAIR_X86_64),
+        _SockFilter(BPF_LD | BPF_W | BPF_ABS, 0, 0, 16),
+        _SockFilter(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, socket.AF_UNIX),
+        _SockFilter(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM),
+        _SockFilter(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW),
+    )
+    program = _SockFprog(len(filters), filters)
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise RuntimeError(f"seccomp no_new_privs failed: {os.strerror(error)}")
+    if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(program)) != 0:
+        error = ctypes.get_errno()
+        raise RuntimeError(f"seccomp network filter failed: {os.strerror(error)}")
+
+
+def _apply_landlock(read_only: list[Path], read_write: list[Path]) -> None:
+    """Install fail-closed ABI-v4 filesystem/TCP and seccomp IP-socket policies."""
+    if sys.platform != "linux":
+        raise RuntimeError("isolated execution requires Linux Landlock")
+    try:
+        abi = _landlock_syscall(444, 0, 0, LANDLOCK_CREATE_RULESET_VERSION)
+    except OSError as error:
+        raise RuntimeError("Landlock is unavailable") from error
+    if abi < 4:
+        raise RuntimeError(f"Landlock ABI 4 or newer is required (found {abi})")
+    handled_fs = LANDLOCK_FS_READ | LANDLOCK_FS_WRITE
+    attributes = _LandlockRulesetAttr(
+        handled_access_fs=handled_fs,
+        handled_access_net=LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP,
+    )
+    try:
+        ruleset = _landlock_syscall(
+            444, ctypes.byref(attributes), ctypes.sizeof(attributes), 0
+        )
+        for path, access in [
+            *((item, LANDLOCK_FS_READ) for item in read_only),
+            *((item, handled_fs) for item in read_write),
+        ]:
+            if not path.exists() or path.is_symlink():
+                raise RuntimeError(f"Landlock allowlisted path is unsafe or absent: {path}")
+            descriptor = os.open(path, os.O_PATH | os.O_CLOEXEC)
+            try:
+                effective_access = access if path.is_dir() else access & LANDLOCK_FS_FILE
+                rule = _LandlockPathBeneathAttr(
+                    allowed_access=effective_access, parent_fd=descriptor
+                )
+                _landlock_syscall(
+                    445,
+                    ruleset,
+                    LANDLOCK_RULE_PATH_BENEATH,
+                    ctypes.byref(rule),
+                    0,
+                )
+            finally:
+                os.close(descriptor)
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        _landlock_syscall(446, ruleset, 0)
+        _deny_non_unix_sockets(libc)
+    except Exception:
+        if "ruleset" in locals():
+            os.close(ruleset)
+        raise
+    os.close(ruleset)
+
+
+def _device_write_paths() -> list[Path]:
+    candidates = [
+        Path("/dev/null"),
+        Path("/dev/zero"),
+        Path("/dev/random"),
+        Path("/dev/urandom"),
+        *Path("/dev").glob("nvidia*"),
+        *Path("/dev/nvidia-caps").glob("*"),
+        *Path("/dev/dri").glob("*"),
+    ]
+    return [
+        path
+        for path in dict.fromkeys(candidates)
+        if path.exists()
+        and not path.is_symlink()
+        and stat.S_ISCHR(path.stat().st_mode)
+    ]
+
+
+def run_isolated(args: argparse.Namespace) -> dict:
+    """Apply the fixed Arbor validation sandbox, then replace this process."""
+    run_dir = Path(args.run_dir).absolute()
+    allowed_parent = ALLOWED_EXPERIMENT_ROOT / "runs"
+    if (
+        run_dir.resolve() != run_dir
+        or run_dir.parent != allowed_parent
+        or not re.fullmatch(r"[0-9a-f]{16}(?:-a[1-9][0-9]*)?", run_dir.name)
+    ):
+        raise RuntimeError("isolated run directory is outside the allowlist")
+    environment = ENVIRONMENT_ROOT / args.environment_id
+    environment_validate(argparse.Namespace(environment_id=args.environment_id))
+    dataset = Path(args.dataset_root).absolute()
+    if dataset.resolve() != dataset or dataset != Path("/home/a/andrewsq/data/urop/minivess-half"):
+        raise RuntimeError("isolated dataset root is not canonical")
+    source = run_dir / "source"
+    script = source / "scripts" / "run_slurm.sh"
+    for path in (source, script, dataset / "train", dataset / "val"):
+        if path.is_symlink() or not path.exists():
+            raise RuntimeError("isolated execution input is unsafe or absent")
+    sandbox = run_dir / "outputs" / ".sandbox"
+    home, temporary, cache = sandbox / "home", sandbox / "tmp", sandbox / "cache"
+    for path in (home, temporary, cache):
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    system_paths = list(
+        dict.fromkeys(
+            Path(path).resolve()
+            for path in ("/usr", "/bin", "/lib", "/lib64", "/etc", "/dev", "/proc", "/sys")
+            if Path(path).exists()
+        )
+    )
+    _apply_landlock(
+        [source, run_dir / "control", environment, dataset / "train", dataset / "val", *system_paths],
+        [
+            run_dir / "outputs",
+            run_dir / "logs",
+            *([Path("/dev/shm")] if Path("/dev/shm").is_dir() else []),
+            *_device_write_paths(),
+        ],
+    )
+    descriptor_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    close_until = (
+        1_048_576
+        if descriptor_limit == resource.RLIM_INFINITY
+        else min(int(descriptor_limit), 1_048_576)
+    )
+    os.closerange(3, close_until)
+    keep = {
+        key: value
+        for key, value in os.environ.items()
+        if key.startswith(("DSCNET_", "SLURM_", "CUDA_", "NVIDIA_"))
+    }
+    keep.update(
+        {
+            "HOME": str(home),
+            "TMPDIR": str(temporary),
+            "XDG_CACHE_HOME": str(cache),
+            "PATH": f"{environment / 'bin'}:/usr/bin:/bin",
+            "PYTHONNOUSERSITE": "1",
+        }
+    )
+    preflight = source / "tools" / "arbor_preflight.py"
+    if preflight.is_symlink() or not preflight.is_file():
+        raise RuntimeError("isolated candidate preflight is unsafe or absent")
+    command = " && ".join(
+        (
+            f"{shlex.quote(str(environment / 'bin' / 'python'))} "
+            f"{shlex.quote(str(preflight))} --run-tests",
+            f"/bin/bash {shlex.quote(str(script))}",
+        )
+    )
+    os.execve("/bin/bash", ["bash", "-c", command], keep)
+    raise AssertionError("execve returned")
 
 
 def _environment_source(value: str) -> Path:
@@ -641,6 +895,10 @@ def audit(args: argparse.Namespace) -> dict:
     if run_dir.parent != ALLOWED_EXPERIMENT_ROOT / "runs" or run_dir.is_symlink():
         raise RuntimeError("audit run directory is outside the experiment run root")
     manifest = json.loads((run_dir / "control" / "run-manifest.json").read_text())
+    if manifest.get("isolated_run_store") is True:
+        raise RuntimeError(
+            "isolated Arbor research runs are validation-only and cannot be audited"
+        )
     if manifest.get("run_id") != run_dir.name or manifest.get("action") != "train":
         raise RuntimeError("audit accepts completed training runs only")
     parent_status = status(argparse.Namespace(job_id=str(manifest.get("job_id", ""))))
@@ -799,12 +1057,17 @@ def status(args: argparse.Namespace) -> dict:
         capture_output=True,
         text=True,
     )
-    if queue.returncode != 0:
-        raise RuntimeError(queue.stderr.strip() or "squeue failed")
-    queued = queue.stdout.strip().splitlines()
+    queued = queue.stdout.strip().splitlines() if queue.returncode == 0 else []
     if queued:
         return {"job_id": args.job_id, "source": "squeue", "state": queued[0]}
-    last_error = ""
+    aged_job = re.fullmatch(
+        r"\s*(?:slurm_load_jobs error:\s*)?Invalid job id specified\s*",
+        queue.stderr,
+        flags=re.IGNORECASE,
+    )
+    if queue.returncode != 0 and aged_job is None:
+        raise RuntimeError(queue.stderr.strip() or "squeue failed")
+    last_error = queue.stderr.strip() if queue.returncode != 0 else ""
     for attempt in range(3):
         accounting = subprocess.run(
             [
@@ -824,7 +1087,7 @@ def status(args: argparse.Namespace) -> dict:
         states = [line.split("|")[0] for line in accounting.stdout.splitlines() if line]
         if accounting.returncode == 0 and states:
             return {"job_id": args.job_id, "source": "sacct", "state": states[0]}
-        last_error = accounting.stderr.strip()
+        last_error = accounting.stderr.strip() or last_error
         if attempt < 2:
             time.sleep(1)
     raise RuntimeError(last_error or "job is absent from squeue and sacct")
@@ -1398,6 +1661,10 @@ def build_parser() -> argparse.ArgumentParser:
     final.add_argument("--run-dir", required=True)
     final.add_argument("--best-checkpoint", required=True)
     final.add_argument("--latest-checkpoint", default="")
+    isolated = subparsers.add_parser("run-isolated")
+    isolated.add_argument("--run-dir", required=True)
+    isolated.add_argument("--environment-id", required=True)
+    isolated.add_argument("--dataset-root", required=True)
     return parser
 
 
@@ -1419,6 +1686,7 @@ def main() -> int:
         "ui-stop": ui_stop,
         "verify-artifacts": verify_artifacts,
         "finalize": finalize,
+        "run-isolated": run_isolated,
     }
     try:
         result = handlers[args.command](args)

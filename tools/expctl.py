@@ -335,11 +335,12 @@ def _action_dataset_manifest(full: dict[str, Any], action: str) -> dict[str, Any
 
 
 def _write_remote_text_manifests(
-    control: Path, full: dict[str, Any], remote_dataset_root: str
+    control: Path, full: dict[str, Any], remote_dataset_root: str, action: str
 ) -> dict[str, str]:
     mapping: dict[str, str] = {}
     prefixes = {"train": "Tr", "val": "Va", "test": "Te"}
-    for split, prefix in prefixes.items():
+    for split in _action_splits(action):
+        prefix = prefixes[split]
         records = full["splits"][split]
         for kind, directory in (("Image", "image"), ("Label", "label")):
             path = control / f"{kind}_{prefix}.txt"
@@ -575,7 +576,9 @@ class ExperimentController:
     ) -> dict[str, Any]:
         name, config, resolved = self._load_config(experiment, extra)
         provenance = _source_provenance(config.runtime.formal)
-        full_dataset = build_dataset_manifest(config.data.data_dir)
+        full_dataset = build_dataset_manifest(
+            config.data.data_dir, splits=_action_splits(config.action)
+        )
         dataset = _action_dataset_manifest(full_dataset, config.action)
         environment = _environment_lock()
         with tempfile.TemporaryDirectory() as directory:
@@ -591,6 +594,7 @@ class ExperimentController:
                 pending_control,
                 full_dataset,
                 "/home/a/andrewsq/data/urop/minivess-half",
+                config.action,
             )
             legacy_paths = to_runtime_namespace(config)
             normalization = None
@@ -738,6 +742,7 @@ class ExperimentController:
                 "environment_status": "unchecked",
                 "environment_job_id": None,
                 "environment_path": environment["environment_path"],
+                "isolated_run_store": bool(config.runtime.mlflow.isolated_run_store),
                 "job_id": None,
                 "state": "staged",
             }
@@ -751,12 +756,28 @@ class ExperimentController:
         source = f"{remote_run}/source"
         control = f"{remote_run}/control"
         outputs = f"{remote_run}/outputs"
-        command = " ".join(
-            shlex.quote(value)
-            for value in ["bash", f"{source}/scripts/run_slurm.sh"]
-        )
         helper = f"{source}/tools/expctl_remote.py"
         python = manifest["environment_path"] + "/bin/python"
+        if config.runtime.mlflow.isolated_run_store:
+            command = " ".join(
+                shlex.quote(value)
+                for value in [
+                    ENVIRONMENT_BASE_PYTHON,
+                    helper,
+                    "run-isolated",
+                    "--run-dir",
+                    remote_run,
+                    "--environment-id",
+                    manifest["environment"]["environment_id"],
+                    "--dataset-root",
+                    "/home/a/andrewsq/data/urop/minivess-half",
+                ]
+            )
+        else:
+            command = " ".join(
+                shlex.quote(value)
+                for value in ["bash", f"{source}/scripts/run_slurm.sh"]
+            )
         return f"""#!/usr/bin/env bash
 #SBATCH --job-name=dscnet-expctl
 #SBATCH --output={remote_run}/logs/slurm-%j.out
@@ -1555,6 +1576,10 @@ exit "$finalize_status"
                 "audit requires --authorize-final-test after the candidate is frozen"
             )
         _, record = self._record(run_id)
+        if record.get("isolated_run_store") is True:
+            raise ExpctlError(
+                "isolated Arbor research runs are validation-only and cannot be audited"
+            )
         if record.get("action") != "train":
             raise ExpctlError("audit accepts training runs only")
         # This also requires a fetched, checksum-verified, validation-only result.

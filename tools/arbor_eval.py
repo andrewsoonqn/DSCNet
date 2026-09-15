@@ -78,6 +78,8 @@ def evaluate(
             "runtime.formal=true",
             "--set",
             "runtime.allow_dirty=false",
+            "--set",
+            "runtime.mlflow.isolated_run_store=true",
         ]
     )
     run_id = submitted.get("run_id")

@@ -43,6 +43,13 @@ class ExperimentTrackingTests(unittest.TestCase):
         self.assertEqual(sum(map(len, first["splits"].values())), 3)
         self.assertEqual(len(first["digest"]), 64)
 
+    def test_dataset_manifest_can_exclude_untouched_test_split(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._dataset(root)
+            manifest = build_dataset_manifest(root, splits=("train", "val"))
+        self.assertEqual(set(manifest["splits"]), {"train", "val"})
+
     def test_consumed_manifest_binds_ordered_text_splits(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -318,6 +318,37 @@ class ExpctlControllerTests(unittest.TestCase):
         self.assertNotIn("DSCNetEnv", script)
         self.assertNotIn("workflow.py", script)
 
+    def test_isolated_job_uses_trusted_remote_landlock_wrapper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = self._controller(root)._stage(
+                EXPERIMENT,
+                [
+                    *self.overrides,
+                    "action=train",
+                    "runtime.mlflow.isolated_run_store=true",
+                ],
+            )
+            control = root / "runs" / record["run_id"] / "control"
+            script = (control / "job.sbatch").read_text()
+            control_names = {path.name for path in control.iterdir()}
+        self.assertTrue(record["isolated_run_store"])
+        self.assertNotIn("Image_Te.txt", control_names)
+        self.assertNotIn("Label_Te.txt", control_names)
+        self.assertIn("expctl_remote.py run-isolated", script)
+        self.assertIn("--environment-id", script)
+        self.assertIn("--dataset-root /home/a/andrewsq/data/urop/minivess-half", script)
+
+    def test_audit_rejects_isolated_research_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._controller(Path(directory))
+            record = controller._stage(
+                EXPERIMENT,
+                [*self.overrides, "runtime.mlflow.isolated_run_store=true"],
+            )
+            with self.assertRaisesRegex(ExpctlError, "validation-only"):
+                controller.audit(record["run_id"], True)
+
     def test_resource_and_path_allowlists_fail_closed(self):
         cases = {
             "Slurm account": [*self.overrides, "runtime.slurm.account=untrusted"],

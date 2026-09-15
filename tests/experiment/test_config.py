@@ -101,6 +101,18 @@ class ExperimentConfigTests(unittest.TestCase):
             identity_config_yaml(warn_config), identity_config_yaml(strict_config)
         )
 
+    def test_isolated_run_store_is_strict_and_identity_bearing(self):
+        _, shared = load_experiment_config()
+        isolated, resolved = load_experiment_config(
+            overrides=["runtime.mlflow.isolated_run_store=true"]
+        )
+        self.assertTrue(isolated.runtime.mlflow.isolated_run_store)
+        self.assertNotEqual(identity_config_yaml(shared), identity_config_yaml(resolved))
+        with self.assertRaises(ConfigCompositionException):
+            load_experiment_config(
+                overrides=["runtime.mlflow.isolated_run_store=enabled"]
+            )
+
     def test_resolved_yaml_contains_every_effective_group(self):
         config, resolved = load_experiment_config()
         text = resolved_yaml(resolved)

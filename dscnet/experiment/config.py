@@ -100,6 +100,7 @@ class MlflowUIConfig:
 
 @dataclass
 class MlflowConfig:
+    isolated_run_store: bool = False
     tracking_uri: str = "sqlite:///artifacts/experiments/mlflow.db"
     artifact_root: str = "artifacts/experiments/mlflow-artifacts"
     experiment_name: str = "dscnet"
