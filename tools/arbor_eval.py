@@ -15,6 +15,7 @@ from typing import Any, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPCTL = REPO_ROOT / "tools" / "expctl.py"
 EXPERIMENT = REPO_ROOT / "configs" / "experiment" / "dscnet_standard.yaml"
+NORMALIZATION_NAME = "DSCNet_3D_Meanstd.npy"
 TERMINAL_FAILURES = {
     "BOOT_FAIL",
     "CANCELLED",
@@ -66,6 +67,11 @@ def evaluate(
     data_dir = Path(data_dir).expanduser().resolve()
     if not data_dir.is_dir():
         raise ArborEvaluationError("the configured local dataset directory is missing")
+    normalization = data_dir / NORMALIZATION_NAME
+    if not normalization.is_file():
+        raise ArborEvaluationError(
+            f"the configured local dataset is missing {NORMALIZATION_NAME}"
+        )
     submitted = _run_expctl(
         [
             "submit",
@@ -74,6 +80,8 @@ def evaluate(
             "action=train",
             "--set",
             f"data.data_dir={data_dir}",
+            "--set",
+            f"data.Meanstd_path={normalization}",
             "--set",
             "runtime.formal=true",
             "--set",

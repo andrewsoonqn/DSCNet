@@ -37,6 +37,8 @@ class ArborEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch(
             "arbor_eval.subprocess.run", side_effect=responses
         ) as command, patch("arbor_eval.time.sleep"):
+            normalization = Path(directory) / arbor_eval.NORMALIZATION_NAME
+            normalization.write_bytes(b"training normalization")
             result = arbor_eval.evaluate(directory, poll_seconds=0)
 
         self.assertEqual(
@@ -51,6 +53,7 @@ class ArborEvaluationTests(unittest.TestCase):
         )
         submit = command.call_args_list[0].args[0]
         self.assertIn("action=train", submit)
+        self.assertIn(f"data.Meanstd_path={normalization.resolve()}", submit)
         self.assertIn("runtime.formal=true", submit)
         self.assertIn("runtime.allow_dirty=false", submit)
         self.assertIn("runtime.mlflow.isolated_run_store=true", submit)
@@ -69,10 +72,20 @@ class ArborEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch(
             "arbor_eval.subprocess.run", side_effect=responses
         ) as command:
+            (Path(directory) / arbor_eval.NORMALIZATION_NAME).write_bytes(
+                b"training normalization"
+            )
             with self.assertRaisesRegex(arbor_eval.ArborEvaluationError, "FAILED"):
                 arbor_eval.evaluate(directory)
         invoked_operations = [call.args[0][2] for call in command.call_args_list]
         self.assertEqual(invoked_operations, ["submit", "status"])
+
+    def test_adapter_requires_normalization_beside_dataset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                arbor_eval.ArborEvaluationError, arbor_eval.NORMALIZATION_NAME
+            ):
+                arbor_eval.evaluate(directory)
 
     def test_adapter_has_no_audit_or_test_operation(self):
         source = Path(arbor_eval.__file__).read_text()
