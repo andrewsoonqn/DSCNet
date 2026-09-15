@@ -1,0 +1,60 @@
+coordinator:
+  task: >-
+    Improve DSCNet's frozen best-checkpoint validation.dice above the
+    0.8569065042 baseline through scientifically motivated changes within the
+    allowed edit surface. Use validation only for iteration. Do not access the
+    MiniVess test split, expctl audit, MLflow registry operations, or champion.
+  max_cycles: 3
+  max_tree_depth: 2
+  max_turns: 120
+  executor_max_turns: 50
+  auto_git: true
+  git_branch_prefix: arbor/dscnet-pilot
+  base_branch: main
+  require_base_branch: true
+  enforce_protected: true
+  protected_paths:
+    - .agents/**
+    - .gitignore
+    - .pi/**
+    - ARBOR_CONTRACT.md
+    - Data/**
+    - configs/config.yaml
+    - configs/data/**
+    - configs/experiment/**
+    - configs/runtime/**
+    - dscnet/data/**
+    - dscnet/evaluation/**
+    - dscnet/experiment/**
+    - dscnet/workflow.py
+    - pyproject.toml
+    - research_config.yaml
+    - scripts/**
+    - tests/data/**
+    - tests/evaluation/**
+    - tests/experiment/**
+    - tests/integration/**
+    - tests/test_workflow.py
+    - tests/tools/**
+    - tests/training/test_checkpoints.py
+    - tests/training/test_validation_retention.py
+    - tools/arbor_eval.py
+    - tools/expctl.py
+    - tools/expctl_remote.py
+    - uv.lock
+  ui:
+    interaction_mode: auto
+  budget_policy:
+    mode: fixed-cycles
+    require_cost_estimate: true
+    max_parallel_executors: 1
+  search:
+    enabled: false
+
+executor:
+  experiment_cmd: >-
+    DSCNET_ARBOR_DATA_DIR=/Users/andrewsoon/dev/urop/data/minivess-half
+    uv run --locked python tools/arbor_eval.py
+  max_turns: 50
+  auto_git: true
+  git_branch_prefix: arbor/dscnet-pilot
