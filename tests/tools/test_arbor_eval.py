@@ -80,6 +80,22 @@ class ArborEvaluationTests(unittest.TestCase):
         invoked_operations = [call.args[0][2] for call in command.call_args_list]
         self.assertEqual(invoked_operations, ["submit", "status"])
 
+    def test_cancelled_training_with_slurm_actor_suffix_is_terminal(self):
+        responses = [
+            self._completed({"run_id": "a" * 16}),
+            self._completed({"state": "CANCELLED by 54098"}),
+        ]
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "arbor_eval.subprocess.run", side_effect=responses
+        ) as command:
+            (Path(directory) / arbor_eval.NORMALIZATION_NAME).write_bytes(
+                b"training normalization"
+            )
+            with self.assertRaisesRegex(arbor_eval.ArborEvaluationError, "CANCELLED"):
+                arbor_eval.evaluate(directory)
+        invoked_operations = [call.args[0][2] for call in command.call_args_list]
+        self.assertEqual(invoked_operations, ["submit", "status"])
+
     def test_adapter_requires_normalization_beside_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(

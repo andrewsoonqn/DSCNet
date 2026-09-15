@@ -96,7 +96,7 @@ def evaluate(
     deadline = time.monotonic() + timeout_seconds
     while True:
         current = _run_expctl(["status", run_id])
-        state = str(current.get("state", "")).split("+", 1)[0]
+        state = str(current.get("state", "")).split("+", 1)[0].split(maxsplit=1)[0]
         if state == "COMPLETED":
             break
         if state in TERMINAL_FAILURES:
