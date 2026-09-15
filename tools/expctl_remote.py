@@ -242,7 +242,7 @@ def _close_inherited_descriptors() -> None:
 
 
 def _isolated_environment(
-    environment: Path, home: Path, temporary: Path, cache: Path
+    environment: Path, home: Path, _temporary: Path, cache: Path
 ) -> dict[str, str]:
     keep = {
         key: value
@@ -253,7 +253,9 @@ def _isolated_environment(
     keep.update(
         {
             "HOME": str(home),
-            "TMPDIR": str(temporary),
+            # Python multiprocessing appends its own socket path. A run-owned
+            # path exceeds Linux's 108-byte AF_UNIX limit for immutable runs.
+            "TMPDIR": "/tmp",
             "XDG_CACHE_HOME": str(cache),
             "PATH": f"{environment / 'bin'}:/usr/bin:/bin",
             "PYTHONNOUSERSITE": "1",

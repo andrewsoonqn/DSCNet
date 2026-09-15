@@ -302,6 +302,8 @@ class ExpctlRemoteTests(unittest.TestCase):
             )
         self.assertEqual(environment["GPU_DEVICE_ORDINAL"], "0")
         self.assertEqual(environment["CUDA_VISIBLE_DEVICES"], "0")
+        self.assertEqual(environment["TMPDIR"], "/tmp")
+        self.assertLess(len(environment["TMPDIR"] + "/pymp-abcdefgh/listener-abcdefgh"), 108)
         self.assertNotIn("SSH_AUTH_SOCK", environment)
 
     def test_cancel_is_idempotent_for_terminal_job(self):
