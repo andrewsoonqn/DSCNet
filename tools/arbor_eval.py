@@ -95,7 +95,17 @@ def evaluate(
         raise ArborEvaluationError("expctl submission returned no run ID")
     deadline = time.monotonic() + timeout_seconds
     while True:
-        current = _run_expctl(["status", run_id])
+        try:
+            current = _run_expctl(["status", run_id])
+        except ArborEvaluationError as error:
+            if "ssh timed out after" not in str(error):
+                raise
+            if time.monotonic() >= deadline:
+                raise ArborEvaluationError(
+                    f"training run {run_id} exceeded the evaluator wait budget"
+                ) from error
+            time.sleep(poll_seconds)
+            continue
         state = str(current.get("state", "")).split("+", 1)[0].split(maxsplit=1)[0]
         if state == "COMPLETED":
             break

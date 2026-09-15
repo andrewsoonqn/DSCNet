@@ -64,6 +64,50 @@ class ArborEvaluationTests(unittest.TestCase):
         self.assertNotIn("audit", invoked_operations)
         self.assertNotIn("logged_model_id", result)
 
+    def test_transient_ssh_status_timeout_is_retried(self):
+        responses = [
+            self._completed({"run_id": "a" * 16}),
+            subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr=json.dumps({"error": "ssh timed out after 120 seconds"}),
+            ),
+            self._completed({"state": "COMPLETED"}),
+            self._completed({"destination": "/fetched"}),
+            self._completed(
+                {"selection": {"metric": "validation.dice", "value": 0.85}}
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "arbor_eval.subprocess.run", side_effect=responses
+        ) as command, patch("arbor_eval.time.sleep"):
+            (Path(directory) / arbor_eval.NORMALIZATION_NAME).write_bytes(
+                b"training normalization"
+            )
+            result = arbor_eval.evaluate(directory, poll_seconds=0)
+        self.assertEqual(result["score"], 0.85)
+        invoked_operations = [call.args[0][2] for call in command.call_args_list]
+        self.assertEqual(
+            invoked_operations, ["submit", "status", "status", "fetch", "result"]
+        )
+
+    def test_unrelated_status_error_still_fails_closed(self):
+        responses = [
+            self._completed({"run_id": "a" * 16}),
+            subprocess.CompletedProcess(
+                [], 1, stdout="", stderr=json.dumps({"error": "permission denied"})
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "arbor_eval.subprocess.run", side_effect=responses
+        ):
+            (Path(directory) / arbor_eval.NORMALIZATION_NAME).write_bytes(
+                b"training normalization"
+            )
+            with self.assertRaisesRegex(arbor_eval.ArborEvaluationError, "permission denied"):
+                arbor_eval.evaluate(directory)
+
     def test_failed_training_never_fetches_or_reads_results(self):
         responses = [
             self._completed({"run_id": "a" * 16}),
